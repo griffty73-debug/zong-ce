@@ -12,6 +12,9 @@ type RegisterPayload = LoginPayload & {
   name: string
   role?: string
   className?: string
+  collegeId?: number | null
+  majorId?: number | null
+  classGroupId?: number | null
 }
 
 type AuthResponse = {

@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { UserPlus } from 'lucide-vue-next'
-import { reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 
+import { apiFetch } from '@/api/client'
+import type { ClassGroup, College, Major } from '@/api/types'
 import { useSessionStore } from '@/stores/session'
 
 const router = useRouter()
@@ -12,15 +14,68 @@ const form = reactive({
   name: '',
   password: '',
   className: '',
+  collegeId: '' as string,
+  majorId: '' as string,
+  classGroupId: '' as string,
 })
 const error = ref('')
 const loading = ref(false)
+const colleges = ref<College[]>([])
+const majors = ref<Major[]>([])
+const classes = ref<ClassGroup[]>([])
+
+const filteredMajors = computed(() =>
+  form.collegeId ? majors.value.filter((item) => String(item.collegeId) === String(form.collegeId)) : [],
+)
+const filteredClasses = computed(() =>
+  form.majorId ? classes.value.filter((item) => String(item.majorId) === String(form.majorId)) : [],
+)
+
+async function loadOrg() {
+  try {
+    const tree = await apiFetch<{
+      tree: { id: number; name: string; code: string; majors: { id: number; name: string; code: string; classes: { id: number; name: string; gradeYear?: number | null }[] }[] }[]
+    }>('/api/organization/tree')
+    colleges.value = tree.tree.map((c) => ({ id: c.id, name: c.name, code: c.code }))
+    const allMajors: Major[] = []
+    const allClasses: ClassGroup[] = []
+    tree.tree.forEach((c) => {
+      c.majors.forEach((m) => {
+        allMajors.push({ id: m.id, collegeId: c.id, name: m.name, code: m.code, collegeName: c.name })
+        m.classes.forEach((cl) => {
+          allClasses.push({ id: cl.id, majorId: m.id, name: cl.name, majorName: m.name, collegeId: c.id, collegeName: c.name, gradeYear: cl.gradeYear ?? null })
+        })
+      })
+    })
+    majors.value = allMajors
+    classes.value = allClasses
+  } catch (err) {
+    // 忽略：注册页允许组织架构为空
+  }
+}
+
+function resetMajor() {
+  form.majorId = ''
+  form.classGroupId = ''
+}
+
+function resetClass() {
+  form.classGroupId = ''
+}
 
 async function submit() {
   error.value = ''
   loading.value = true
   try {
-    await session.register(form)
+    await session.register({
+      studentNo: form.studentNo,
+      name: form.name,
+      password: form.password,
+      className: form.className,
+      collegeId: form.collegeId || null,
+      majorId: form.majorId || null,
+      classGroupId: form.classGroupId || null,
+    })
     router.push('/dashboard')
   } catch (err: any) {
     error.value = err.message || '注册失败'
@@ -28,6 +83,8 @@ async function submit() {
     loading.value = false
   }
 }
+
+onMounted(loadOrg)
 </script>
 
 <template>
@@ -47,7 +104,28 @@ async function submit() {
           <input v-model.trim="form.name" autocomplete="name" required />
         </label>
         <label class="field">
+          <span>学院</span>
+          <select v-model="form.collegeId" @change="resetMajor">
+            <option value="">不指定</option>
+            <option v-for="item in colleges" :key="item.id" :value="String(item.id)">{{ item.name }}</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>专业</span>
+          <select v-model="form.majorId" :disabled="!form.collegeId" @change="resetClass">
+            <option value="">不指定</option>
+            <option v-for="item in filteredMajors" :key="item.id" :value="String(item.id)">{{ item.name }}</option>
+          </select>
+        </label>
+        <label class="field">
           <span>班级</span>
+          <select v-model="form.classGroupId" :disabled="!form.majorId">
+            <option value="">不指定</option>
+            <option v-for="item in filteredClasses" :key="item.id" :value="String(item.id)">{{ item.name }}</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>班级备注</span>
           <input v-model.trim="form.className" placeholder="如 计科 2301" />
         </label>
         <label class="field">

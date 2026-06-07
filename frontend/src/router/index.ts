@@ -14,7 +14,6 @@ const router = createRouter({
     { path: '/review/:id', component: () => import('@/views/ReviewDetailView.vue') },
     { path: '/appeals', component: () => import('@/views/AppealsView.vue') },
     { path: '/publicity', component: () => import('@/views/PublicityView.vue') },
-    { path: '/gesture', redirect: '/dashboard' },
     { path: '/ai', component: () => import('@/views/AiAssistantView.vue') },
   ],
 })

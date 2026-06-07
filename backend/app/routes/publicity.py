@@ -8,7 +8,8 @@ publicity_bp = Blueprint("publicity", __name__)
 @publicity_bp.get("/rank")
 def rank():
     anonymous = request.args.get("anonymous", "1") != "0"
-    return jsonify(master().publicity.ranking(current_user(), anonymous))
+    term_id = request.args.get("termId", type=int)
+    return jsonify(master().publicity.ranking(current_user(), anonymous, term_id=term_id))
 
 
 @publicity_bp.post("/start")

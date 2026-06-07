@@ -1,5 +1,4 @@
 from datetime import timedelta
-
 from flask import abort
 from sqlalchemy import func
 
@@ -7,11 +6,17 @@ from ..extensions import db
 from ..models import Appeal, Material, PublicityBatch, User, utc_now
 from ..state_machine import MaterialStatus, assert_transition
 from .common import ensure_role
+from .notification_agent import NotificationAgent
 from .responses import agent_response
+from .term_agent import TermAgent
 
 
 class PublicityAgent:
-    def ranking(self, user: User | None = None, anonymous: bool = False) -> dict:
+    def __init__(self):
+        self.term = TermAgent()
+        self.notification = NotificationAgent()
+
+    def ranking(self, user: User | None = None, anonymous: bool = False, term_id: int | None = None) -> dict:
         query = (
             db.session.query(User, func.coalesce(func.sum(Material.score), 0).label("total_score"))
             .join(Material, Material.student_id == User.id)
@@ -25,7 +30,11 @@ class PublicityAgent:
                 )
             )
         )
-        if user and user.role in {"student", "counselor"} and user.class_name:
+        if term_id:
+            query = query.filter(Material.term_id == term_id)
+        if user and user.role in {"student", "counselor"} and user.class_group_id:
+            query = query.filter(User.class_group_id == user.class_group_id)
+        elif user and user.role in {"student", "counselor"} and user.class_name:
             query = query.filter(User.class_name == user.class_name)
         rows = query.group_by(User.id).order_by(func.coalesce(func.sum(Material.score), 0).desc(), User.student_no.asc()).all()
         active_batch = self._active_batch()
@@ -52,11 +61,13 @@ class PublicityAgent:
     def start(self, user: User, payload: dict) -> dict:
         ensure_role(user, {"counselor"})
         class_name = payload.get("className") or user.class_name
-        pending_appeals = self._pending_appeals(class_name)
+        term_id = payload.get("termId") or user.term_hint if hasattr(user, "term_hint") else None
+        term_id = payload.get("termId") or self.term.ensure_current().id
+        pending_appeals = self._pending_appeals(class_name, term_id)
         if pending_appeals:
             abort(400, description="存在未处理申诉，暂不能发起公示")
 
-        query = Material.query.filter_by(status=MaterialStatus.APPROVED.value)
+        query = Material.query.filter_by(status=MaterialStatus.APPROVED.value, term_id=term_id)
         if class_name:
             query = query.join(User, Material.student_id == User.id).filter(User.class_name == class_name)
         materials = query.all()
@@ -64,7 +75,7 @@ class PublicityAgent:
             abort(400, description="没有可公示的已通过材料")
 
         if payload.get("confirm") != "确认公示":
-            preview = self.ranking(user, anonymous=True)
+            preview = self.ranking(user, anonymous=True, term_id=term_id)
             return agent_response(
                 agent="Publicity Agent",
                 status="pending_confirmation",
@@ -89,6 +100,16 @@ class PublicityAgent:
             created_by_id=user.id,
         )
         db.session.add(batch)
+        for material in materials:
+            if material.student_id:
+                self.notification.push(
+                    user_id=material.student_id,
+                    type="publicity_started",
+                    title="综测公示已发起",
+                    content=f"《{material.title}》已进入公示期，请在公示期内查看并提交申诉。",
+                    link="/publicity",
+                    related_id=material.id,
+                )
         db.session.commit()
         return agent_response(
             agent="Publicity Agent",
@@ -108,6 +129,16 @@ class PublicityAgent:
             material.status = MaterialStatus.PUBLICITY_ENDED.value
         batch.status = "已归档"
         batch.archived_at = utc_now()
+        for material in materials:
+            if material.student_id:
+                self.notification.push(
+                    user_id=material.student_id,
+                    type="publicity_archived",
+                    title="综测公示已归档",
+                    content=f"《{material.title}》公示期结束，已归档为最终成绩。",
+                    link="/publicity",
+                    related_id=material.id,
+                )
         db.session.commit()
         return agent_response(
             agent="Publicity Agent",
@@ -146,8 +177,11 @@ class PublicityAgent:
             "text": f"距离公示结束还剩 {hours // 24} 天 {hours % 24} 小时",
         }
 
-    def _pending_appeals(self, class_name: str | None) -> int:
+    def _pending_appeals(self, class_name: str | None, term_id: int | None) -> int:
         query = Appeal.query.filter_by(status="待处理")
+        if term_id:
+            query = query.filter_by(term_id=term_id)
         if class_name:
             query = query.join(User, Appeal.student_id == User.id).filter(User.class_name == class_name)
         return query.count()
+

@@ -7,12 +7,16 @@ from .extensions import db
 from .routes.ai import ai_bp
 from .routes.appeal import appeal_bp
 from .routes.auth import auth_bp
+from .routes.export import export_bp
 from .routes.external import external_bp
-from .routes.gesture import gesture_bp
 from .routes.materials import materials_bp
+from .routes.notifications import notifications_bp
+from .routes.organization import organization_bp
 from .routes.publicity import publicity_bp
 from .routes.review import review_bp
 from .routes.risk import risk_bp
+from .routes.stats import stats_bp
+from .routes.terms import terms_bp
 from .state_machine import StateMachineError
 
 
@@ -29,8 +33,12 @@ def create_app() -> Flask:
     app.register_blueprint(appeal_bp, url_prefix="/api/appeal")
     app.register_blueprint(publicity_bp, url_prefix="/api/publicity")
     app.register_blueprint(risk_bp, url_prefix="/api/risk")
-    app.register_blueprint(gesture_bp, url_prefix="/api/gesture")
     app.register_blueprint(ai_bp, url_prefix="/api/ai")
+    app.register_blueprint(terms_bp, url_prefix="/api/terms")
+    app.register_blueprint(organization_bp, url_prefix="/api/organization")
+    app.register_blueprint(notifications_bp, url_prefix="/api/notifications")
+    app.register_blueprint(export_bp, url_prefix="/api/export")
+    app.register_blueprint(stats_bp, url_prefix="/api/stats")
     app.register_blueprint(external_bp, url_prefix="/api/external")
 
     @app.get("/api/health")

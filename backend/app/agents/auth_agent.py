@@ -18,6 +18,9 @@ class AuthAgent:
         name = str(payload.get("name", "")).strip()
         password = str(payload.get("password", "")).strip()
         class_name = str(payload.get("className", "")).strip() or None
+        college_id = payload.get("collegeId")
+        major_id = payload.get("majorId")
+        class_group_id = payload.get("classGroupId")
         role = infer_role(student_no, payload.get("role"))
 
         if not student_no or not re.fullmatch(r"20\d{9}", student_no):
@@ -29,7 +32,15 @@ class AuthAgent:
         if User.query.filter_by(student_no=student_no).first():
             abort(409, description="该学工号已注册")
 
-        user = User(student_no=student_no, name=name, role=role, class_name=class_name)
+        user = User(
+            student_no=student_no,
+            name=name,
+            role=role,
+            class_name=class_name,
+            college_id=int(college_id) if college_id not in (None, "") else None,
+            major_id=int(major_id) if major_id not in (None, "") else None,
+            class_group_id=int(class_group_id) if class_group_id not in (None, "") else None,
+        )
         user.set_password(password)
         db.session.add(user)
         db.session.commit()

@@ -10,8 +10,11 @@
 - Appeal Agent：学生申诉、复核处理，接口 `/api/appeal/*`
 - Publicity Agent：公示发起、降序排名、匿名看榜、归档，接口 `/api/publicity/*`
 - Risk Agent：重复证书、过期证书、未来日期拦截，接口 `/api/risk/*`
-- Gesture Agent：手势识别结果解析、置信度过滤、防抖、二次确认、Agent 路由，接口 `/api/gesture/*`
 - DeepSeek Agent：接入 DeepSeek V4 Pro，提供综测智能问答与分析，接口 `/api/ai/*`
+- Term Agent：学期/测评周期管理与过滤，接口 `/api/terms/*`
+- Organization Agent：学院 / 专业 / 班级三级组织架构，接口 `/api/organization/*`
+- Notification Agent：站内消息与提醒，接口 `/api/notifications/*`
+- Export Agent：学生 / 班级综测成绩单 PDF 与 Excel 导出，接口 `/api/export/*`
 - Master Agent：按角色并行汇总 Worker Agent 结果，供工作台使用
 
 ## 状态机
@@ -86,45 +89,6 @@ cd /Users/yang/Dev/zong_ce/backend
 - 学生：`2023001001 / 123456`
 - 老师：`1001 / 123456`
 - 辅导员：`123456 / 123456`
-
-## 手势调度接口
-
-入口：
-
-```http
-POST /api/gesture/dispatch
-Authorization: Bearer <token>
-Content-Type: application/json
-```
-
-基础输入兼容前端摄像头动作捕捉输出：
-
-```json
-{
-  "userId": "2023001001",
-  "role": "student",
-  "page": "publicity",
-  "gesture": "SWIPE_RIGHT",
-  "confidence": 0.9,
-  "timestamp": 1710000000,
-  "context": {
-    "pageIndex": 1,
-    "pageSize": 8
-  }
-}
-```
-
-已实现规则：
-
-- 置信度阈值：`OPEN_PALM 0.85`、`FIST 0.8`、`OK_SIGN 0.9`、`POINT 0.8`、`SWIPE 0.75`
-- 同一用户、同一页面、同一手势 2 秒内重复会被忽略
-- 高风险操作 `REJECT_MATERIAL`、`SUBMIT_APPEAL` 会返回二次确认令牌
-- 二次确认可保持原手势 3 秒后重发，或使用 `OK_SIGN + confirmToken`
-- 公示中、公示结束、申诉处理中禁止审核写操作
-- 学生端材料上传页不接入摄像头动作捕捉，材料提交仍通过上传表单完成
-- 学生端公示榜、总览材料列表、申诉列表支持真实摄像头动作捕捉：左扇上一页，右扇下一页，上扇上划，下扇下划
-
-前端动作捕捉基于浏览器摄像头权限，在业务列表页点击“启动动作捕捉”后，以 `96x72` 帧差、亮度阈值和低通滤波计算扇动方向，再调用 `/api/gesture/dispatch` 返回 Agent 调度结果。
 
 ## 前端启动
 

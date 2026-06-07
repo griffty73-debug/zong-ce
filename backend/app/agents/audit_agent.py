@@ -6,14 +6,18 @@ from flask import abort
 from ..extensions import db
 from ..models import Material, User
 from ..state_machine import MaterialStatus, assert_transition
+from .notification_agent import NotificationAgent
 from .responses import agent_response
 from .risk_agent import RiskAgent
 from .scoring_rules import CATEGORY_SCORE_CAPS, ScoreDecision, apply_existing_constraints, score_material
+from .term_agent import TermAgent
 
 
 class AuditAgent:
-    def __init__(self, risk_agent: RiskAgent | None = None):
+    def __init__(self, risk_agent: RiskAgent | None = None, term_agent: TermAgent | None = None, notification_agent: NotificationAgent | None = None):
         self.risk_agent = risk_agent or RiskAgent()
+        self.term_agent = term_agent or TermAgent()
+        self.notification_agent = notification_agent or NotificationAgent()
 
     def upload_material(self, user: User, payload: dict) -> dict:
         if user.role != "student":
@@ -31,8 +35,11 @@ class AuditAgent:
         self.risk_agent.assert_upload_allowed(inspection)
         decision = self._score_decision(user, payload)
 
+        term_id = self.term_agent.resolve_term_id(payload.get("termId"))
+
         material = Material(
             student_id=user.id,
+            term_id=term_id,
             title=title,
             category=category,
             description=str(payload.get("description", "")).strip(),
@@ -63,10 +70,12 @@ class AuditAgent:
             },
         )
 
-    def list_materials(self, user: User) -> dict:
+    def list_materials(self, user: User, term_id: int | None = None) -> dict:
         query = Material.query
         if user.role == "student":
             query = query.filter_by(student_id=user.id)
+        if term_id:
+            query = query.filter_by(term_id=term_id)
         materials = query.order_by(Material.updated_at.desc()).all()
         return agent_response(
             agent="Audit Agent",
@@ -75,8 +84,11 @@ class AuditAgent:
             data={"items": [item.to_dict() for item in materials]},
         )
 
-    def student_summary(self, user: User) -> dict:
-        materials = Material.query.filter_by(student_id=user.id).all()
+    def student_summary(self, user: User, term_id: int | None = None) -> dict:
+        query = Material.query.filter_by(student_id=user.id)
+        if term_id:
+            query = query.filter_by(term_id=term_id)
+        materials = query.all()
         approved = [item for item in materials if item.status in {MaterialStatus.APPROVED.value, MaterialStatus.PUBLICIZING.value, MaterialStatus.PUBLICITY_ENDED.value}]
         total = sum(float(item.score) for item in approved)
         return agent_response(
@@ -93,6 +105,8 @@ class AuditAgent:
     def _score_decision(self, user: User, payload: dict) -> ScoreDecision:
         decision = score_material(payload)
         query = Material.query.filter_by(student_id=user.id)
+        if payload.get("termId"):
+            query = query.filter_by(term_id=payload["termId"])
         existing_rule_score = Decimal("0")
         existing_event_score: Decimal | None = None
         contest_count = 0
@@ -183,3 +197,4 @@ class AuditAgent:
         if statuses == {MaterialStatus.APPROVED.value}:
             return MaterialStatus.APPROVED.value
         return "处理中"
+

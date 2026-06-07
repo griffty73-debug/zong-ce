@@ -4,10 +4,16 @@ from ..extensions import db
 from ..models import Appeal, Material, User, utc_now
 from ..state_machine import MaterialStatus, assert_transition
 from .common import ensure_role
+from .notification_agent import NotificationAgent
 from .responses import agent_response
+from .term_agent import TermAgent
 
 
 class AppealAgent:
+    def __init__(self):
+        self.term = TermAgent()
+        self.notification = NotificationAgent()
+
     def submit(self, user: User, payload: dict) -> dict:
         ensure_role(user, {"student"})
         material = db.session.get(Material, payload.get("materialId"))
@@ -18,11 +24,30 @@ class AppealAgent:
         reason = str(payload.get("reason", "")).strip()
         if not reason:
             abort(400, description="申诉原因不能为空")
+        evidence_files = payload.get("evidenceFiles") or []
+        if not isinstance(evidence_files, list):
+            abort(400, description="evidenceFiles 必须为数组")
+        clean_files = []
+        for item in evidence_files[:10]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            url = str(item.get("url", "")).strip()
+            if not name or not url:
+                continue
+            clean_files.append({"name": name, "url": url})
 
         assert_transition(material.status, MaterialStatus.APPEALING)
         material.status = MaterialStatus.APPEALING.value
-        appeal = Appeal(material_id=material.id, student_id=user.id, reason=reason)
+        appeal = Appeal(
+            material_id=material.id,
+            student_id=user.id,
+            term_id=material.term_id,
+            reason=reason,
+            evidence_files=clean_files,
+        )
         db.session.add(appeal)
+        self._notify_counselor(appeal, material)
         db.session.commit()
         return agent_response(
             agent="Appeal Agent",
@@ -31,14 +56,16 @@ class AppealAgent:
             data={"appeal": appeal.to_dict()},
         )
 
-    def list(self, user: User) -> dict:
+    def list(self, user: User, term_id: int | None = None) -> dict:
         query = Appeal.query
         if user.role == "student":
             query = query.filter_by(student_id=user.id)
         else:
             ensure_role(user, {"teacher", "counselor"})
-            if user.role == "counselor" and user.class_name:
-                query = query.join(User, Appeal.student_id == User.id).filter(User.class_name == user.class_name)
+            if user.role == "counselor" and user.class_group_id:
+                query = query.join(User, Appeal.student_id == User.id).filter(User.class_group_id == user.class_group_id)
+        if term_id:
+            query = query.filter_by(term_id=term_id)
         appeals = query.order_by(Appeal.created_at.desc()).all()
         return agent_response(
             agent="Appeal Agent",
@@ -78,6 +105,14 @@ class AppealAgent:
         target = MaterialStatus.PUBLICIZING if action == "accept" else MaterialStatus.PUBLICITY_ENDED
         assert_transition(appeal.material.status, target)
         appeal.material.status = target.value
+        self.notification.push(
+            user_id=appeal.student_id,
+            type="appeal_resolved",
+            title="申诉已复核",
+            content=f"《{appeal.material.title}》申诉结果：{appeal.status}，{opinion}",
+            link=f"/appeals",
+            related_id=appeal.id,
+        )
         db.session.commit()
         return agent_response(
             agent="Appeal Agent",
@@ -112,8 +147,9 @@ class AppealAgent:
             abort(400, description="请说明具体存在的问题，如哪个项目算错或漏算")
         assert_transition(material.status, MaterialStatus.APPEALING)
         material.status = MaterialStatus.APPEALING.value
-        appeal = Appeal(material_id=material.id, student_id=user.id, reason=reason)
+        appeal = Appeal(material_id=material.id, student_id=user.id, term_id=material.term_id, reason=reason)
         db.session.add(appeal)
+        self._notify_counselor(appeal, material)
         db.session.commit()
         return agent_response(
             agent="Appeal Agent",
@@ -126,6 +162,22 @@ class AppealAgent:
             data={"appeal": appeal.to_dict(), "material": material.to_dict()},
         )
 
+    def _notify_counselor(self, appeal: Appeal, material: Material) -> None:
+        from ..models import User
+
+        counselors = User.query.filter_by(role="counselor").all()
+        for counselor in counselors:
+            if counselor.class_group_id and material.student and material.student.class_group_id != counselor.class_group_id:
+                continue
+            self.notification.push(
+                user_id=counselor.id,
+                type="appeal_submitted",
+                title="学生提交了新申诉",
+                content=f"《{material.title}》由 {material.student.name if material.student else '学生'} 发起申诉",
+                link="/appeals",
+                related_id=appeal.id,
+            )
+
     def _approved_total(self, user: User) -> float:
         materials = Material.query.filter_by(student_id=user.id).filter(
             Material.status.in_(
@@ -137,3 +189,4 @@ class AppealAgent:
             )
         )
         return round(sum(float(item.score) for item in materials), 2)
+

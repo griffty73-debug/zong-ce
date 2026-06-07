@@ -7,18 +7,26 @@ import {
   LayoutDashboard,
   LogOut,
   Megaphone,
+  Menu,
   Trophy,
+  X,
 } from 'lucide-vue-next'
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 
+import NotificationBell from '@/components/NotificationBell.vue'
+import TermSelector from '@/components/TermSelector.vue'
 import { useSessionStore } from '@/stores/session'
+import { useTermStore } from '@/stores/term'
 
 const route = useRoute()
 const router = useRouter()
 const session = useSessionStore()
+const term = useTermStore()
 
 const isPublic = computed(() => Boolean(route.meta.public))
+const navOpen = ref(false)
+const isMobile = ref(false)
 
 const navItems = computed(() => {
   if (!session.user) return []
@@ -48,21 +56,108 @@ const navItems = computed(() => {
   ]
 })
 
+const currentTitle = computed(() => {
+  const path = route.path
+  const match = navItems.value.find((item) => item.to === path)
+  if (match) return match.label
+  if (path.startsWith('/review/')) return '审核详情'
+  if (path === '/login') return '登录'
+  if (path === '/register') return '注册'
+  return '高校综测系统'
+})
+
+function syncViewport() {
+  if (typeof window === 'undefined') return
+  const next = window.matchMedia('(max-width: 920px)').matches
+  isMobile.value = next
+  if (!next) navOpen.value = false
+}
+
+function toggleNav() {
+  navOpen.value = !navOpen.value
+}
+
+function closeNav() {
+  navOpen.value = false
+}
+
+function handleNavClick() {
+  if (isMobile.value) closeNav()
+}
+
 function logout() {
   session.logout()
   router.push('/login')
+  closeNav()
 }
+
+watch(() => route.fullPath, () => {
+  if (isMobile.value) closeNav()
+})
+
+onMounted(() => {
+  syncViewport()
+  window.addEventListener('resize', syncViewport)
+  if (session.isAuthed) {
+    term.load()
+  }
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', syncViewport)
+})
 </script>
 
 <template>
   <RouterView v-if="isPublic" />
   <div v-else class="app-shell">
-    <aside class="sidebar">
+    <header v-if="isMobile" class="app-bar">
+      <button
+        class="icon-button"
+        type="button"
+        :aria-expanded="navOpen"
+        aria-controls="primary-sidebar"
+        aria-label="打开导航菜单"
+        @click="toggleNav"
+      >
+        <Menu v-if="!navOpen" :size="20" aria-hidden="true" />
+        <X v-else :size="20" aria-hidden="true" />
+      </button>
+      <div class="app-bar-brand">
+        <span class="brand-mark">综</span>
+        <span class="app-bar-brand-text">{{ currentTitle }}</span>
+      </div>
+      <NotificationBell />
+      <button
+        class="icon-button"
+        type="button"
+        aria-label="退出登录"
+        @click="logout"
+      >
+        <LogOut :size="18" aria-hidden="true" />
+      </button>
+    </header>
+
+    <div
+      v-if="isMobile && navOpen"
+      class="drawer-backdrop"
+      aria-hidden="true"
+      @click="closeNav"
+    />
+
+    <aside
+      id="primary-sidebar"
+      class="sidebar"
+      :class="{ 'drawer-open': navOpen }"
+      :aria-hidden="isMobile && !navOpen"
+      :inert="isMobile && !navOpen ? true : undefined"
+    >
       <div class="brand">
         <span class="brand-mark">综</span>
         <span>高校综测系统</span>
       </div>
-      <nav class="nav">
+      <TermSelector />
+      <nav class="nav" @click="handleNavClick">
         <RouterLink v-for="item in navItems" :key="item.to" :to="item.to">
           <component :is="item.icon" :size="18" aria-hidden="true" />
           <span>{{ item.label }}</span>
@@ -73,14 +168,28 @@ function logout() {
           <strong>{{ session.user?.name }}</strong>
           <div>{{ session.user?.studentNo }} · {{ session.user?.role }}</div>
         </div>
-        <button class="button secondary" type="button" @click="logout">
-          <LogOut :size="16" aria-hidden="true" />
-          退出
-        </button>
+        <div class="sidebar-footer-actions">
+          <NotificationBell />
+          <button class="button secondary" type="button" @click="logout">
+            <LogOut :size="16" aria-hidden="true" />
+            退出
+          </button>
+        </div>
       </div>
     </aside>
+
     <main class="page">
-      <RouterView />
+      <div class="page-inner">
+        <RouterView />
+      </div>
     </main>
   </div>
 </template>
+
+<style scoped>
+.sidebar-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+</style>

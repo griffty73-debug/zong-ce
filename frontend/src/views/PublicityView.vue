@@ -1,14 +1,16 @@
 <script setup lang="ts">
-import { Megaphone, RotateCw, Trophy } from 'lucide-vue-next'
-import { onMounted, reactive, ref } from 'vue'
+import { Download, FileSpreadsheet, FileText, Megaphone, RotateCw, Trophy } from 'lucide-vue-next'
+import { onMounted, reactive, ref, watch } from 'vue'
 
 import { apiFetch, postJson } from '@/api/client'
 import type { RankItem } from '@/api/types'
 import EmptyState from '@/components/EmptyState.vue'
-import MotionCaptureControl from '@/components/MotionCaptureControl.vue'
+import { useTermRefresh } from '@/composables/useTermRefresh'
 import { useSessionStore } from '@/stores/session'
+import { useTermStore } from '@/stores/term'
 
 const session = useSessionStore()
+const termStore = useTermStore()
 const ranks = ref<RankItem[]>([])
 const error = ref('')
 const success = ref('')
@@ -16,10 +18,7 @@ const loading = ref(false)
 const confirmPending = ref(false)
 const suggestions = ref<string[]>([])
 const countdown = ref('')
-const pageIndex = ref(1)
-const pageSize = 8
-const totalRanks = ref(0)
-const tableWrapRef = ref<HTMLDivElement | null>(null)
+const exporting = ref<string>('')
 const form = reactive({
   title: '综合测评公示',
   className: session.user?.className || '',
@@ -37,28 +36,14 @@ type PublicityResponse = {
   batch?: { title: string }
 }
 
-type MotionPayload = {
-  direction: 'up' | 'down' | 'left' | 'right'
-  response: {
-    uiFeedback: { level: string; message: string }
-    data: {
-      items?: RankItem[]
-      pageIndex?: number
-      total?: number
-      scrollDirection?: 'up' | 'down'
-    }
-  }
-}
-
 async function loadRanks() {
   error.value = ''
   loading.value = true
   try {
     const anonymous = session.role === 'student' ? '1' : '0'
-    const result = await apiFetch<PublicityResponse>(`/api/publicity/rank?anonymous=${anonymous}`)
+    const qs = termStore.currentId ? `&termId=${termStore.currentId}` : ''
+    const result = await apiFetch<PublicityResponse>(`/api/publicity/rank?anonymous=${anonymous}${qs}`)
     ranks.value = result.items || []
-    pageIndex.value = 1
-    totalRanks.value = ranks.value.length
     suggestions.value = result.suggestions || []
     countdown.value = result.countdown?.text || ''
   } catch (err: any) {
@@ -72,10 +57,9 @@ async function startPublicity() {
   error.value = ''
   success.value = ''
   try {
-    const result = await postJson<PublicityResponse>('/api/publicity/start', {
-      ...form,
-      confirm: confirmPending.value ? '确认公示' : undefined,
-    })
+    const payload: Record<string, unknown> = { ...form, confirm: confirmPending.value ? '确认公示' : undefined }
+    if (termStore.currentId) payload.termId = termStore.currentId
+    const result = await postJson<PublicityResponse>('/api/publicity/start', payload)
     suggestions.value = result.suggestions || []
     if (result.requiresConfirmation) {
       confirmPending.value = true
@@ -91,28 +75,39 @@ async function startPublicity() {
   }
 }
 
-function handleMotionCaptured(payload: MotionPayload) {
-  const { data, uiFeedback } = payload.response
-  if (Array.isArray(data.items)) {
-    ranks.value = data.items
-  }
-  if (typeof data.pageIndex === 'number') {
-    pageIndex.value = data.pageIndex
-  }
-  if (typeof data.total === 'number') {
-    totalRanks.value = data.total
-  }
-  if (data.scrollDirection) {
-    tableWrapRef.value?.scrollBy({
-      top: data.scrollDirection === 'up' ? -220 : 220,
-      behavior: 'smooth',
+async function downloadExport(format: 'pdf' | 'xlsx') {
+  if (exporting.value) return
+  exporting.value = format
+  error.value = ''
+  try {
+    const token = sessionStorage.getItem('zc_token') || ''
+    const termQs = termStore.currentId ? `&termId=${termStore.currentId}` : ''
+    const response = await fetch(`/api/export/ranking.${format}?anonymous=0${termQs}`, {
+      headers: { Authorization: `Bearer ${token}` },
     })
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}))
+      throw new Error(payload.message || '导出失败')
+    }
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `综测排行榜-${new Date().toISOString().slice(0, 10)}.${format}`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  } catch (err: any) {
+    error.value = err.message || '导出失败'
+  } finally {
+    exporting.value = ''
   }
-  error.value = uiFeedback.level === 'warning' ? uiFeedback.message : ''
-  success.value = uiFeedback.level === 'warning' ? '' : uiFeedback.message
 }
 
 onMounted(loadRanks)
+watch(() => termStore.currentId, loadRanks)
+useTermRefresh(loadRanks)
 </script>
 
 <template>
@@ -123,10 +118,32 @@ onMounted(loadRanks)
         <h1>公示排名</h1>
         <p class="muted">排名按已通过、公示中和公示结束材料总分降序生成。</p>
       </div>
-      <button class="button secondary" type="button" @click="loadRanks">
-        <RotateCw :size="16" aria-hidden="true" />
-        刷新
-      </button>
+      <div class="toolbar">
+        <button
+          v-if="session.role === 'counselor' || session.role === 'teacher'"
+          class="button secondary"
+          type="button"
+          :disabled="Boolean(exporting)"
+          @click="downloadExport('xlsx')"
+        >
+          <FileSpreadsheet :size="16" aria-hidden="true" />
+          {{ exporting === 'xlsx' ? '导出中' : '导出 Excel' }}
+        </button>
+        <button
+          v-if="session.role === 'counselor' || session.role === 'teacher'"
+          class="button secondary"
+          type="button"
+          :disabled="Boolean(exporting)"
+          @click="downloadExport('pdf')"
+        >
+          <FileText :size="16" aria-hidden="true" />
+          {{ exporting === 'pdf' ? '导出中' : '导出 PDF' }}
+        </button>
+        <button class="button secondary" type="button" @click="loadRanks">
+          <RotateCw :size="16" aria-hidden="true" />
+          刷新
+        </button>
+      </div>
     </header>
 
     <div v-if="error" class="alert">{{ error }}</div>
@@ -160,16 +177,7 @@ onMounted(loadRanks)
         <h2>排行榜</h2>
         <Trophy :size="22" color="#a56704" aria-hidden="true" />
       </div>
-      <MotionCaptureControl
-        v-if="session.role === 'student'"
-        class="motion-inline"
-        page="publicity"
-        :page-index="pageIndex"
-        :page-size="pageSize"
-        :context="{ total: totalRanks }"
-        @captured="handleMotionCaptured"
-      />
-      <div v-if="ranks.length" ref="tableWrapRef" class="table-wrap motion-table">
+      <div v-if="ranks.length" class="table-wrap">
         <table>
           <thead>
             <tr>
@@ -200,15 +208,19 @@ onMounted(loadRanks)
         <span v-for="item in suggestions" :key="item" class="tag primary">{{ item }}</span>
       </div>
     </section>
+
+    <p v-if="session.role === 'student'" class="muted small-tip">
+      <Download :size="14" aria-hidden="true" />
+      学生个人成绩单请前往【总览】页右上角下载。
+    </p>
   </div>
 </template>
 
 <style scoped>
-.motion-inline {
-  margin-bottom: 12px;
-}
-
-.motion-table {
-  max-height: 520px;
+.small-tip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
 }
 </style>

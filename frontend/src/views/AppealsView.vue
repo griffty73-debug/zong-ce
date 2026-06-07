@@ -1,54 +1,47 @@
 <script setup lang="ts">
-import { CheckCircle2, RotateCw, Send, XCircle } from 'lucide-vue-next'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { CheckCircle2, Paperclip, RotateCw, Send, Upload, X, XCircle } from 'lucide-vue-next'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 
-import { apiFetch, postJson } from '@/api/client'
+import { apiFetch, postForm, postJson } from '@/api/client'
 import type { Appeal, Material } from '@/api/types'
 import EmptyState from '@/components/EmptyState.vue'
-import MotionCaptureControl from '@/components/MotionCaptureControl.vue'
 import StatusTag from '@/components/StatusTag.vue'
+import { useTermRefresh } from '@/composables/useTermRefresh'
 import { useSessionStore } from '@/stores/session'
+import { useTermStore } from '@/stores/term'
+
+type EvidenceFile = { name: string; url: string }
 
 const session = useSessionStore()
+const termStore = useTermStore()
 const appeals = ref<Appeal[]>([])
 const materials = ref<Material[]>([])
 const error = ref('')
 const success = ref('')
 const loading = ref(false)
 const suggestions = ref<string[]>([])
-const appealPageIndex = ref(1)
-const appealPageSize = 5
-const appealListRef = ref<HTMLDivElement | null>(null)
 const submitForm = reactive({
   materialId: '',
   reason: '',
+  files: [] as EvidenceFile[],
 })
 const resolveForm = reactive<Record<number, { opinion: string }>>({})
+const fileInput = ref<HTMLInputElement | null>(null)
+const evidenceUploading = ref(false)
 
 const publicizingMaterials = computed(() =>
   materials.value.filter((item) => item.status === '公示中'),
 )
 
-type MotionPayload = {
-  response: {
-    uiFeedback: { level: string; message: string }
-    data: {
-      items?: Appeal[]
-      pageIndex?: number
-      scrollDirection?: 'up' | 'down'
-    }
-  }
-}
-
 async function load() {
   error.value = ''
   loading.value = true
   try {
-    const appealResult = await apiFetch<{ items: Appeal[] }>('/api/appeal/list')
+    const qs = termStore.currentId ? `?termId=${termStore.currentId}` : ''
+    const appealResult = await apiFetch<{ items: Appeal[] }>(`/api/appeal/list${qs}`)
     appeals.value = appealResult.items
-    appealPageIndex.value = 1
     if (session.role === 'student') {
-      const materialResult = await apiFetch<{ items: Material[] }>('/api/materials/list')
+      const materialResult = await apiFetch<{ items: Material[] }>(`/api/materials/list${qs}`)
       materials.value = materialResult.items
     }
   } catch (err: any) {
@@ -65,11 +58,13 @@ async function submitAppeal() {
     const result = await postJson<{ message?: string; suggestions?: string[] }>('/api/appeal/submit', {
       materialId: Number(submitForm.materialId),
       reason: submitForm.reason,
+      evidenceFiles: submitForm.files,
     })
     success.value = result.message || '申诉已提交，材料状态进入[申诉处理中]'
     suggestions.value = result.suggestions || []
     submitForm.materialId = ''
     submitForm.reason = ''
+    submitForm.files = []
     await load()
   } catch (err: any) {
     error.value = err.message || '提交申诉失败'
@@ -98,25 +93,38 @@ function ensureResolveForm(appealId: number) {
   return resolveForm[appealId]
 }
 
-function handleAppealMotion(payload: MotionPayload) {
-  const { data, uiFeedback } = payload.response
-  if (Array.isArray(data.items)) {
-    appeals.value = data.items
+function openEvidencePicker() {
+  fileInput.value?.click()
+}
+
+async function handleEvidenceSelect(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = input.files
+  if (!files || files.length === 0) return
+  evidenceUploading.value = true
+  error.value = ''
+  try {
+    for (const file of Array.from(files)) {
+      const data = new FormData()
+      data.append('file', file)
+      const result = await postForm<{ data: EvidenceFile }>('/api/appeal/upload-file', data)
+      submitForm.files.push(result.data)
+    }
+  } catch (err: any) {
+    error.value = err.message || '证据上传失败'
+  } finally {
+    evidenceUploading.value = false
+    input.value = ''
   }
-  if (typeof data.pageIndex === 'number') {
-    appealPageIndex.value = data.pageIndex
-  }
-  if (data.scrollDirection) {
-    appealListRef.value?.scrollBy({
-      top: data.scrollDirection === 'up' ? -220 : 220,
-      behavior: 'smooth',
-    })
-  }
-  error.value = uiFeedback.level === 'warning' ? uiFeedback.message : ''
-  success.value = uiFeedback.level === 'warning' ? '' : uiFeedback.message
+}
+
+function removeEvidence(index: number) {
+  submitForm.files.splice(index, 1)
 }
 
 onMounted(load)
+watch(() => termStore.currentId, load)
+useTermRefresh(load)
 </script>
 
 <template>
@@ -125,7 +133,7 @@ onMounted(load)
       <div>
         <p class="eyebrow">{{ session.role === 'student' ? '学生端' : '辅导员端' }}</p>
         <h1>{{ session.role === 'student' ? '我的申诉' : '申诉处理' }}</h1>
-        <p class="muted">申诉只在[公示中]材料上生效。</p>
+        <p class="muted">申诉只在[公示中]材料上生效，可附图佐证。</p>
       </div>
       <button class="button secondary" type="button" @click="load">
         <RotateCw :size="16" aria-hidden="true" />
@@ -155,6 +163,38 @@ onMounted(load)
           <span>申诉原因</span>
           <textarea v-model.trim="submitForm.reason" required />
         </label>
+        <div class="field full">
+          <span>证据附件</span>
+          <div class="evidence-zone">
+            <button
+              class="button secondary"
+              type="button"
+              :disabled="evidenceUploading"
+              @click="openEvidencePicker"
+            >
+              <Upload :size="16" aria-hidden="true" />
+              {{ evidenceUploading ? '上传中' : '添加证据' }}
+            </button>
+            <input
+              ref="fileInput"
+              class="sr-only"
+              type="file"
+              accept="image/jpeg,image/png,image/gif,image/webp,application/pdf"
+              multiple
+              @change="handleEvidenceSelect"
+            />
+            <ul v-if="submitForm.files.length" class="evidence-list">
+              <li v-for="(file, index) in submitForm.files" :key="file.url">
+                <Paperclip :size="14" aria-hidden="true" />
+                <a :href="file.url" target="_blank" rel="noopener">{{ file.name }}</a>
+                <button class="icon-button" type="button" aria-label="移除" @click="removeEvidence(index)">
+                  <X :size="14" aria-hidden="true" />
+                </button>
+              </li>
+            </ul>
+            <span v-else class="muted">支持 JPG/PNG/GIF/WebP/PDF，最多 5MB / 个</span>
+          </div>
+        </div>
         <button class="button field full" type="submit">
           <Send :size="16" aria-hidden="true" />
           提交申诉
@@ -164,15 +204,7 @@ onMounted(load)
 
     <section class="panel">
       <h2>申诉列表</h2>
-      <MotionCaptureControl
-        v-if="appeals.length"
-        class="motion-inline"
-        page="appeal"
-        :page-index="appealPageIndex"
-        :page-size="appealPageSize"
-        @captured="handleAppealMotion"
-      />
-      <div v-if="appeals.length" ref="appealListRef" class="grid appeal-list">
+      <div v-if="appeals.length" class="grid appeal-list">
         <article v-for="appeal in appeals" :key="appeal.id" class="card">
           <div class="page-header" style="margin-bottom: 10px">
             <div>
@@ -207,13 +239,55 @@ onMounted(load)
 </template>
 
 <style scoped>
-.motion-inline {
-  margin-bottom: 12px;
+.appeal-list {
+  padding-right: 2px;
 }
 
-.appeal-list {
-  max-height: 560px;
-  overflow: auto;
-  padding-right: 2px;
+.evidence-zone {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-muted);
+}
+
+.evidence-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.evidence-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+
+.evidence-list a {
+  color: var(--primary);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 </style>
