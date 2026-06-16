@@ -1,699 +1,501 @@
-# 高校综测系统说明文档
+# 高校综测系统 — 系统架构·技术栈·功能设计·API 参考
 
-> 适用版本：`zong-ce-backend` / `zong-ce-frontend@0.1.0`
-> 技术栈：Vue 3 + Vite 6 + Pinia + TypeScript / Flask + PostgreSQL + DeepSeek V4 Pro
-> 架构模式：**Master Agent + Worker Agent**（总控调度官 + 多角色智能体）
+## 一、项目概述
 
----
-
-## 目录
-
-1. [系统总览](#一系统总览)
-2. [角色与端口划分](#二角色与端口划分)
-3. [状态机与业务流程](#三状态机与业务流程)
-4. [后端架构](#四后端架构)
-5. [学生端](#五学生端)
-6. [老师端](#六老师端)
-7. [辅导员端](#七辅导员端)
-8. [通用能力（智能助手、通知、导出、外部 API）](#八通用能力)
-9. [数据模型](#九数据模型)
-10. [接口约定](#十接口约定)
-11. [前端实现要点](#十一前端实现要点)
-12. [部署与演示账号](#十二部署与演示账号)
+**高校综测系统**是一个基于 AI 的高校综合测评管理平台，支持材料上传与智能解析、五育评分、多级审核、公示排名、申诉处理、数据导出等全流程管理。
 
 ---
 
-## 一、系统总览
+## 二、技术栈
 
-### 1.1 业务目标
+| 层级 | 技术 | 版本 |
+|------|------|------|
+| **后端框架** | Flask + Flask-SQLAlchemy | 3.1.x |
+| **WSGI 服务器** | Gunicorn | 26.0 |
+| **进程管理** | systemd | — |
+| **Web 服务器** | Nginx | 1.24 |
+| **数据库** | PostgreSQL (psycopg) | 3.2 |
+| **前端框架** | Vue 3 + TypeScript | 3.5 |
+| **构建工具** | Vite | 6.0 |
+| **状态管理** | Pinia | 2.3 |
+| **路由** | Vue Router | 4.5 |
+| **图表** | Chart.js + vue-chartjs | 4.4 / 5.3 |
+| **图标** | lucide-vue-next | 0.468 |
+| **AI 服务** | DeepSeek V4 Pro + SiliconFlow Qwen3-VL | — |
+| **认证** | JWT (itsdangerous URLSafeTimedSerializer) | — |
+| **PDF 导出** | ReportLab | 4.2 |
+| **Excel 导出** | openpyxl | 3.1 |
+| **PDF 解析** | PyPDF2 | 3.0 |
 
-高校综测（综合素质测评）系统解决三件事：
+---
 
-- **学生**：上传证书材料、参与综测、查看分数、提交申诉。
-- **老师/辅导员**：对材料进行审核、查看班级统计、发起公示、处理申诉、归档成绩。
-- **系统**：用 AI 智能识别证书内容并按统一评分细则打分，用状态机约束材料流转，确保公示期数据不被篡改。
+## 三、系统架构
 
-### 1.2 技术架构
+### 3.1 整体拓扑
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│  Frontend (Vue 3 + Vite + Pinia)                           │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐       │
-│  │ 学生端口  │ │ 老师端口  │ │ 辅导员端口 │ │ 鉴权公共页 │       │
-│  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘       │
-│       └────────────┴────────────┴────────────┘              │
-│                  axios / fetch（Bearer token）               │
-└──────────────────────────┬─────────────────────────────────┘
-                           │  HTTP / JSON
-┌──────────────────────────┴─────────────────────────────────┐
-│  Flask Backend (Master Agent 调度)                          │
-│  /api/auth    /api/materials   /api/review                  │
-│  /api/appeal  /api/publicity   /api/risk                    │
-│  /api/ai      /api/terms       /api/organization            │
-│  /api/notifications /api/export /api/stats /api/external    │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │ Worker Agents: Auth / Audit / Counselor / Appeal /    │  │
-│  │   Publicity / Risk / DeepSeek / Term / Organization / │  │
-│  │   Notification / Export / Stats / MaterialParser      │  │
-│  └───────────────────────────────────────────────────────┘  │
-│         ↓                                                  │
-│  PostgreSQL (SQLAlchemy ORM) + 本地 uploads 目录           │
-└────────────────────────────────────────────────────────────┘
-                           │
-              DeepSeek V4 Pro（OpenAI 兼容）
+┌──────────────────────────────────────────────────┐
+│                     浏览器                         │
+└────────────────────┬─────────────────────────────┘
+                     │
+                     ▼
+┌──────────────────────────────────────────────────┐
+│                 Nginx (Port 80)                    │
+│  /          → 静态文件 (/var/www/html/zong-ce/)    │
+│  /api/*     → proxy_pass → 127.0.0.1:5003         │
+└────────────────────┬─────────────────────────────┘
+                     │
+                     ▼
+┌──────────────────────────────────────────────────┐
+│         Gunicorn (2 workers, systemd)              │
+│         Flask App (create_app 工厂函数)             │
+│         run:app @ 127.0.0.1:5003                  │
+└────────┬───────────────────────┬──────────────────┘
+         │                       │
+         ▼                       ▼
+┌─────────────────┐   ┌─────────────────────────┐
+│   PostgreSQL     │   │  外部 AI 服务              │
+│   127.0.0.1:5432 │   │  DeepSeek V4 Pro         │
+│   数据库: zong_ce │   │  SiliconFlow Qwen3-VL    │
+└─────────────────┘   └─────────────────────────┘
 ```
 
-### 1.3 角色识别规则
+### 3.2 后端分层架构
 
-由 `backend/app/agents/common.py::infer_role` 统一判断：
+```
+backend/
+├── run.py                    # 入口 (create_app)
+├── app/
+│   ├── __init__.py           # App 工厂, 蓝图注册, DB 初始化
+│   ├── config.py             # 配置 (环境变量)
+│   ├── extensions.py         # SQLAlchemy 扩展
+│   ├── models.py             # 11 个数据模型
+│   ├── state_machine.py      # 材料状态机 (8 种状态)
+│   ├── routes/
+│   │   ├── helpers.py        # JWT 解析, 通用工具
+│   │   ├── auth.py           # 认证接口
+│   │   ├── materials.py      # 材料接口
+│   │   ├── review.py         # 审核接口
+│   │   ├── appeal.py         # 申诉接口
+│   │   ├── publicity.py      # 公示接口
+│   │   ├── risk.py           # 风险检测接口
+│   │   ├── ai.py             # AI 接口
+│   │   ├── terms.py          # 学期管理接口
+│   │   ├── organization.py   # 组织架构接口
+│   │   ├── notifications.py  # 通知接口
+│   │   ├── export.py         # 导出接口
+│   │   ├── stats.py          # 统计接口
+│   │   └── external.py       # 外部 API 接口
+│   └── agents/
+│       ├── common.py         # 角色推断, 通用工具
+│       ├── scoring_rules.py  # 五育评分规则引擎
+│       ├── responses.py      # 统一响应格式
+│       ├── deepseek_client.py    # DeepSeek HTTP 客户端
+│       ├── siliconflow_client.py # SiliconFlow HTTP 客户端
+│       ├── master_agent.py   # 总控调度官
+│       ├── auth_agent.py     # 认证 Agent
+│       ├── audit_agent.py    # 材料审计 Agent
+│       ├── counselor_agent.py# 辅导员审核 Agent
+│       ├── appeal_agent.py   # 申诉处理 Agent
+│       ├── publicity_agent.py# 公示管理 Agent
+│       ├── risk_agent.py     # 风险检测 Agent
+│       ├── deepseek_agent.py # AI 对话 Agent
+│       ├── material_parser.py# 材料智能解析
+│       ├── stats_agent.py    # 统计 Agent
+│       ├── export_agent.py   # 导出 Agent
+│       ├── notification_agent.py # 通知 Agent
+│       ├── organization_agent.py # 组织架构 Agent
+│       └── term_agent.py     # 学期管理 Agent
+```
 
-| 学工号规则                | 角色         | 入口                |
-| ------------------------- | ------------ | ------------------- |
-| `20\d{9}`（20 开头 11 位）| `student`    | 学生端登录页         |
-| 长度 ≤ 6 的纯数字         | `teacher`    | 教师端登录页         |
-| 等于 `123456`             | `counselor`  | 教师端登录页         |
+### 3.3 Agent 架构 (总控调度官 + Worker Agent)
 
-注册时强制要求 `20\d{9}`，否则拒绝。
+```
+                    MasterAgent (总控调度官)
+                    ThreadPoolExecutor(max_workers=3)
+                            │
+        ┌───────────────────┼───────────────────┐
+        ▼                   ▼                   ▼
+   AuthAgent           AuditAgent         CounselorAgent
+        │                   │                   │
+   AppealAgent        PublicityAgent       RiskAgent
+        │                   │                   │
+   DeepSeekAgent      StatsAgent          ExportAgent
+        │                   │                   │
+NotificationAgent   OrganizationAgent     TermAgent
+                            │
+                    MaterialParser
+                    (DeepSeek + SiliconFlow)
+```
 
 ---
 
-## 二、角色与端口划分
+## 四、功能设计
 
-系统通过**学工号格式 + 登录入口（portal）**共同决定用户角色，并在后端做强制校验。
+### 4.1 角色体系
 
-### 2.1 入口差异
+| 角色 | 学号规则 | 核心功能 |
+|------|----------|----------|
+| **学生** | `20` 开头 + 10 位数字 | 材料上传、智能解析、申诉、查看公示排名 |
+| **老师** | 任意 1-6 位字符 | 材料审核（单件/批量） |
+| **辅导员** | `123456` | 材料审核、公示发起/归档、申诉处理、组织架构管理 |
 
-| 入口        | 路径                | 适用角色                  | 前端组件                  |
-| ----------- | ------------------- | ------------------------- | ------------------------- |
-| 学生登录    | `/login/student`    | 仅 `student`              | `StudentLoginView.vue`    |
-| 教师/辅导员 | `/login/teacher`    | `teacher` / `counselor`   | `TeacherLoginView.vue`    |
-| 公共注册    | `/register`         | 自动按学号识别            | `RegisterView.vue`        |
+### 4.2 材料状态机
 
-后端 `AuthAgent.login` 接收 `portal` 字段：
+```
+┌──────┐   提交    ┌────────┐   审核    ┌────────┐
+│ 草稿 │ ──────→ │ 已提交 │ ──────→ │ 审核中 │
+└──┬───┘         └────────┘         └───┬────┘
+   ▲                                    │
+   │ 打回                                ├── 通过 → ┌────────┐
+   │                                    │          │ 已通过 │
+   └────────────────────────────────────┘          └───┬────┘
+                                                       │
+                                      ┌────────────────┼────────────────┐
+                                      ▼                ▼                ▼
+                                 ┌────────┐     ┌──────────┐    ┌──────────┐
+                                 │ 公示中 │ ←── │申诉处理中│    │ 公示结束 │
+                                 └───┬────┘     └──────────┘    └──────────┘
+                                     │               │
+                                     └── 归档 ───────┘
+```
 
-- `portal=student` 且账号不是学生 → 403
-- `portal=staff` 且账号是学生 → 403
+**锁定的状态** (不可修改材料): `公示中` `公示结束` `申诉处理中`
 
-### 2.2 侧边栏菜单（前端按角色动态生成）
+### 4.3 五育评分体系
 
-由 `frontend/src/App.vue:31-57` 集中控制：
+| 类别 | 满分 | 评分依据 |
+|------|------|----------|
+| 德育 | 15.0 | 思政活动、志愿服务、荣誉称号 |
+| 智育 | 20.0 | 学术竞赛、论文发表、英语四六级、SRP 项目 |
+| 体育 | 8.0 | 体育竞赛、运动会 |
+| 美育 | 6.0 | 文艺比赛、文艺活动 |
+| 劳育 | 6.0 | 社会实践、劳动实践 |
+| 能力 | 8.0 | 学生干部、社团职务 |
 
-| 菜单项         | 路径         | student | teacher | counselor |
-| -------------- | ------------ | :-----: | :-----: | :-------: |
-| 总览           | `/dashboard` |    ✓    |    ✓    |     ✓     |
-| 公示排名       | `/publicity` |    ✓    |    ✓    |     ✓     |
-| 智能助手       | `/ai`        |    ✓    |    ✓    |     ✓     |
-| 材料上传       | `/materials` |    ✓    |         |           |
-| 我的申诉       | `/appeals`   |    ✓    |         |           |
-| 材料审核       | `/review`    |         |    ✓    |     ✓     |
-| 班级审核       | `/review`    |         |         |     ✓     |
-| 申诉处理       | `/appeals`   |         |         |     ✓     |
-| 公示发起       | `/publicity` |         |         |     ✓     |
+**评分规则:**
+- 基于关键词匹配的规则引擎，按国家级/省级/市级/校级/院级等级打分
+- 队长/负责人 得满分，普通成员 ×0.7
+- 英语证书取最高分 (CET-4=2, CET-6=3)
+- 同赛事取最高分，竞赛上限 5 项
+- 无匹配规则时标记为"人工预估材料"
 
-> 注：老师与辅导员均进入 `/review` 和 `/publicity`，但 `counselor_agent` 会按 `class_group_id` 自动限定范围。
+### 4.4 风险检测
+
+| 检测项 | 说明 |
+|--------|------|
+| 重复证书 | 相同证书编号已存在于系统中 |
+| 过期证书 | 证书有效期已过 |
+| 未来日期 | 发证日期晚于当前日期 |
+
+高风险材料在提交时被拦截并返回 422。
+
+### 4.5 智能材料解析
+
+```
+上传图片/PDF → 提取内容 → AI 结构化解析 → 用户确认 → 提交
+    │              │              │
+    ▼              ▼              ▼
+ 图片: SiliconFlow  PDF: DeepSeek  JSON: title, category,
+ Qwen3-VL 视觉识别 文本提取+分析    certificateNo, score...
+```
+
+- 支持格式: JPG / PNG / GIF / WebP / PDF
+- 单文件最大 5MB
+- 解析结果由用户确认后填入表单
+
+### 4.6 公示与申诉
+
+- **公示发起**: 辅导员选择班级，输入公示标题，系统自动生成降序排行榜
+- **匿名看榜**: 公示排名对学生隐藏姓名，仅显示学号末位
+- **申诉**: 仅在公示期间可发起，支持上传佐证材料
+- **申诉处理**: 辅导员可接受(回到公示中)或驳回(进入公示结束)
+
+### 4.7 数据导出
+
+- 学生综测成绩单: PDF / Excel
+- 班级排名: PDF / Excel
+- 支持图表嵌入 (雷达图、柱状图等)
 
 ---
 
-## 三、状态机与业务流程
+## 五、外部 API 调用
 
-### 3.1 状态机
+### 5.1 DeepSeek V4 Pro
 
-由 `backend/app/state_machine.py` 定义：
+| 项目 | 配置 |
+|------|------|
+| **端点** | `https://api.deepseek.com/chat/completions` |
+| **模型** | `deepseek-v4-pro` (可配置) |
+| **认证** | `Bearer <DEEPSEEK_API_KEY>` |
+| **超时** | 30s (对话) / 60s (材料解析) |
+| **用途** | AI 智能问答 (带综测规则 system prompt)、PDF 文本结构化提取 |
 
-```
-草稿 ──提交──> 已提交 ──领取──> 审核中 ──┬──通过──> 已通过 ──┬──发起──> 公示中 ──┬──申诉──> 申诉处理中
-                                          │                   │                  │
-                                          │                   │                  ├──归档──> 公示结束
-                                          │                   └─ 申诉处理中 ←──────┘
-                                          │
-                                          └──打回──> 已打回 ──> 草稿（学生重新编辑）
-```
+调用方式: `POST {base_url}/chat/completions`，标准 OpenAI-compatible 格式。
 
-`LOCKED_STATUSES = {公示中, 公示结束, 申诉处理中}`，处于这些状态时材料禁止修改。
+### 5.2 SiliconFlow (Qwen3-VL Vision)
 
-### 3.2 业务规则
+| 项目 | 配置 |
+|------|------|
+| **端点** | `https://api.siliconflow.cn/v1/chat/completions` |
+| **模型** | `Qwen/Qwen3-VL-8B-Instruct` (可配置) |
+| **认证** | `Bearer <SILICONFLOW_API_KEY>` |
+| **超时** | 60s |
+| **用途** | 图片 OCR 识别，提取证书标题/编号/颁发单位，区域检测 |
 
-- 禁止跨阶段跳跃（`assert_transition`）
-- 公示中、公示结束、申诉处理中 → 材料锁定
-- 上传时拦截：重复证书编号、过期证书、未来发证日期（`RiskAgent`）
-- 审核打回必须填写原因（`CounselorAgent.action`）
-- 申诉仅在公示中生效（`AppealAgent.submit`）
-
----
-
-## 四、后端架构
-
-### 4.1 Master Agent
-
-`backend/app/agents/master_agent.py`
-
-唯一的“总控调度官”，在请求到来时按需实例化各 Worker Agent：
-
-```python
-self.term         = TermAgent()
-self.notification = NotificationAgent()
-self.organization = OrganizationAgent()
-self.risk         = RiskAgent()
-self.audit        = AuditAgent(self.risk)
-self.counselor    = CounselorAgent()
-self.appeal       = AppealAgent()
-self.publicity    = PublicityAgent()
-self.stats        = StatsAgent()
-self.export       = ExportAgent()
-self.material_parser = MaterialParser(deepseek_config, siliconflow_config)
-```
-
-**核心能力 — `dashboard(user)`**：用 `ThreadPoolExecutor` 并行调用 3 个子任务：
-
-- 学生：`student_summary` + 匿名排行榜 + 我的申诉
-- 老师/辅导员：待审核列表 + 完整排行榜 + 风险报告
-- 公共：当前学期
-
-### 4.2 Worker Agents 职责矩阵
-
-| Agent              | 主要职责                           | 关键文件                       |
-| ------------------ | ---------------------------------- | ------------------------------ |
-| AuthAgent          | 注册/登录/Token                    | `agents/auth_agent.py`         |
-| AuditAgent         | 材料上传、查询、汇总、评分         | `agents/audit_agent.py`        |
-| CounselorAgent     | 老师/辅导员审核、打回、批量审核     | `agents/counselor_agent.py`    |
-| AppealAgent        | 学生申诉、复核、一审报告确认       | `agents/appeal_agent.py`       |
-| PublicityAgent     | 公示预览、发起、归档、排名         | `agents/publicity_agent.py`    |
-| RiskAgent          | 重复/过期/未来日期拦截             | `agents/risk_agent.py`         |
-| TermAgent          | 学期管理、自动创建默认学期         | `agents/term_agent.py`         |
-| OrganizationAgent  | 学院/专业/班级三级架构             | `agents/organization_agent.py` |
-| NotificationAgent  | 站内消息推送与已读管理             | `agents/notification_agent.py` |
-| DeepSeekAgent      | 综测智能问答                       | `agents/deepseek_agent.py`     |
-| MaterialParser     | 证书图片/PDF 解析                  | `agents/material_parser.py`    |
-| ExportAgent        | PDF / Excel 导出                   | `agents/export_agent.py`       |
-| StatsAgent         | 班级/学生统计、Top 榜、趋势        | `agents/stats_agent.py`        |
-
-### 4.3 响应统一格式
-
-`backend/app/agents/responses.py::agent_response`：
-
-```json
-{
-  "agent": "Audit Agent",
-  "status": "ok",
-  "message": "材料已提交",
-  "suggestions": ["查看审核进度", "..."],
-  "data": { ... }
-}
-```
-
-### 4.4 路由注册
-
-`backend/app/__init__.py` 注册了 13 个蓝图，统一 `/api/*` 前缀，CORS 全开：
-
-| 蓝图                | 前缀                |
-| ------------------- | ------------------- |
-| `auth_bp`           | `/api/auth`         |
-| `materials_bp`      | `/api/materials`    |
-| `review_bp`         | `/api/review`       |
-| `appeal_bp`         | `/api/appeal`       |
-| `publicity_bp`      | `/api/publicity`    |
-| `risk_bp`           | `/api/risk`         |
-| `ai_bp`             | `/api/ai`           |
-| `terms_bp`          | `/api/terms`        |
-| `organization_bp`   | `/api/organization` |
-| `notifications_bp`  | `/api/notifications`|
-| `export_bp`         | `/api/export`       |
-| `stats_bp`          | `/api/stats`        |
-| `external_bp`       | `/api/external`     |
+图片以 base64 编码发送，未配置 SiliconFlow 时回退为纯文本模式。
 
 ---
 
-## 五、学生端
+## 六、数据库模型
 
-### 5.1 入口
-
-- 路由：`/login/student` → `StudentLoginView.vue`
-- 注册：`/register` → `RegisterView.vue`
-- Token：12 小时有效（`itsdangerous.URLSafeTimedSerializer`）
-
-### 5.2 功能清单
-
-| 模块           | 前端页面                | 后端 Agent          | 功能说明                                     |
-| -------------- | ----------------------- | ------------------- | -------------------------------------------- |
-| 注册           | `RegisterView.vue`      | `AuthAgent.register`| 学号校验、密码哈希、自动识别角色             |
-| 登录           | `StudentLoginView.vue`  | `AuthAgent.login`   | 学号不存在时自动建账号（密码 123456）         |
-| 总览           | `DashboardView.vue`     | `MasterAgent.dashboard` | 个人五育雷达、得分柱图、材料状态表       |
-| 材料上传       | `MaterialsView.vue`     | `AuditAgent` / `MaterialParser` | 拖拽上传、AI 解析、风险检测、提交     |
-| 我的申诉       | `AppealsView.vue`       | `AppealAgent`       | 对公示中材料提交申诉、附证据文件             |
-| 一审报告确认   | `AppealsView.vue`       | `AppealAgent.confirm_review` | 对审核结果“正确/有问题”回复          |
-| 公示排名       | `PublicityView.vue`     | `PublicityAgent`    | 匿名查看班级排名（学生名首字+`*`）          |
-| 个人成绩单下载 | `DashboardView.vue`     | `ExportAgent`       | 导出 PDF / Excel                             |
-| 智能助手       | `AiAssistantView.vue`   | `DeepSeekAgent`     | 调用 DeepSeek V4 Pro 综测问答                |
-| 站内消息       | `NotificationBell.vue`  | `NotificationAgent` | 审核结果、公示发起、申诉处理等推送           |
-
-### 5.3 关键实现细节
-
-#### 5.3.1 材料上传与 AI 解析
-
-`MaterialsView.vue:182-209` + `backend/app/routes/materials.py:48-59`
-
-流程：
-1. 学生拖拽或选择文件（JPG/PNG/GIF/WebP/PDF，最大 5MB）
-2. 前端 `postForm('/api/materials/upload-file')` 上传文件
-3. 后端 `_save_upload` 写入 `backend/app/uploads/materials/`
-4. `MaterialParser.parse` 区分 PDF / 图片：
-   - PDF：用 `PyPDF2` 提取文本
-   - 图片：base64 编码后交给 `SiliconFlowClient`（Qwen3-VL-8B）或回退到 DeepSeek 多模态
-5. `scoring_rules.score_material` 根据五育细则打分
-6. 返回结构化建议 `{title, category, certificateNo, suggestedScore, level, role, reasoning, confidence, regions, scoreBasis}`
-7. 前端在 `applyParsedResult` 中将结果填入表单，学生确认后再 `POST /api/materials/upload`
-
-#### 5.3.2 风险检测
-
-`backend/app/agents/risk_agent.py:9-32`
-
-| 规则                  | 触发条件                              | 阻断 |
-| --------------------- | ------------------------------------- | ---- |
-| 重复证书编号          | `Material.certificate_no` 已存在      | 是   |
-| 证书已过期            | `expires_at < today`                  | 是   |
-| 发证日期晚于当前日期  | `issued_at > today`                   | 是   |
-
-`/api/risk/inspect` 提供干跑（不阻断）；`/api/materials/upload` 内置 `assert_upload_allowed` 拦截。
-
-#### 5.3.3 状态流转
-
-`backend/app/agents/audit_agent.py:22-71`
-
-`upload_material` 内部：
-1. 校验 `category ∈ CATEGORY_SCORE_CAPS`（德智体美劳 + 能力）
-2. 风险检测
-3. `term_agent.resolve_term_id` 决定所属学期
-4. `score_material` 计算分数（同赛事取最高、英语等级不累计、学科竞赛最多 5 项）
-5. 写入 `Material`，状态 `DRAFT` → `SUBMITTED`（由 `assert_transition` 校验）
-6. 触发站内通知（如有）
-
-#### 5.3.4 学生一审报告
-
-`/api/appeal/confirm-review`（`appeal_agent.py:124-163`）
-
-学生对自己“已通过”的最新材料回复：
-- **正确**：返回当前已通过总分，材料进入班级待公示库
-- **有问题**：必填说明，状态跳到 `APPEALING`，自动创建 `Appeal` 记录并通知辅导员
-
-#### 5.3.5 申诉与证据上传
-
-`AppealsView.vue:54-72` + `backend/app/routes/appeal.py:35-43`
-
-- 仅状态为 `公示中` 的材料可被申诉（后端 400 阻断）
-- 证据文件走 `POST /api/appeal/upload-file`，落到 `uploads/appeals/`
-- 申诉提交后材料状态 → `APPEALING`（自动加锁），通知对应辅导员
-
-#### 5.3.6 学生导出
-
-`/api/export/student-summary.<pdf|xlsx>?termId=...`
-
-`ExportAgent.student_pdf / student_xlsx`（`agents/export_agent.py`）：
-
-- PDF：`reportlab` 生成，分类小计 + 总分
-- Excel：`openpyxl` 生成，包含五育分项、单条材料明细
-- 入口按钮在 `DashboardView.vue:215-232`
-
----
-
-## 六、老师端
-
-### 6.1 入口
-
-- 路由：`/login/teacher` → `TeacherLoginView.vue`
-- 账号：长度 ≤ 6 的纯数字工号，或 `123456`（辅导员）
-- 演示：`1001 / 123456`（老师）、`123456 / 123456`（辅导员）
-
-### 6.2 功能清单
-
-| 模块        | 前端页面               | 后端 Agent          | 功能说明                                  |
-| ----------- | ---------------------- | ------------------- | ----------------------------------------- |
-| 待审核列表  | `ReviewListView.vue`   | `CounselorAgent`    | 看到所有 `已提交/审核中` 材料，支持批量   |
-| 审核详情    | `ReviewDetailView.vue` | `CounselorAgent`    | 查看材料、附件预览、打回/通过、调整分数   |
-| 统计总览    | `DashboardView.vue`    | `StatsAgent`        | 待审、风险、Top 8、班级对比、近 14 天趋势 |
-| 公示排名    | `PublicityView.vue`    | `PublicityAgent`    | 完整排行榜（实名）+ 导出                  |
-| 智能助手    | `AiAssistantView.vue`  | `DeepSeekAgent`     | 与学生共用                                |
-| 站内消息    | `NotificationBell.vue` | `NotificationAgent` | 审核结果回执                              |
-
-### 6.3 关键实现细节
-
-#### 6.3.1 待审核列表
-
-`backend/app/agents/counselor_agent.py:16-24`
-
-```python
-def list_pending(self, user, term_id=None):
-    ensure_role(user, {"teacher", "counselor"})
-    query = Material.query.filter(Material.status.in_([SUBMITTED, REVIEWING]))
-    if user.role == "counselor" and user.class_group_id:
-        query = query.join(User, ...).filter(User.class_group_id == user.class_group_id)
-    return query.order_by(updated_at.asc()).all()
-```
-
-老师看到全校/全院；辅导员自动按 `class_group_id` 过滤本班。
-
-#### 6.3.2 审核动作
-
-`CounselorAgent.action` 严格走状态机：
+### 6.1 表关系图
 
 ```
-SUBMITTED ──领取──> REVIEWING ──┬──pass──> APPROVED   (score + scoreDelta)
-                                │
-                                └──reject──> REJECTED  (opinion 必填)
+colleges ──┐
+           │ 1:N
+majors ────┤
+           │ 1:N
+class_groups ──┐
+               │ 1:N
+users ─────────┘
+   │
+   ├── 1:N → materials ── 1:N → review_records
+   │              │
+   │              └── 1:N → appeals
+   │
+   ├── 1:N → notifications
+   │
+   └── 1:N → publicity_batches (created_by)
+
+terms ── 1:N → materials
+terms ── 1:N → appeals
+
+api_keys (独立)
 ```
 
-- 打回必须填意见（后端 400）
-- 审核后通过 `NotificationAgent.push` 给学生发“审核通过/被打回”消息
-- 写入 `ReviewRecord` 形成历史轨迹
+### 6.2 表清单
 
-#### 6.3.3 批量审核
-
-`CounselorAgent.batch_action`（`counselor_agent.py:71-114`）：
-
-- 前端 `ReviewListView.vue:57-80` 通过复选框 + 统一意见实现
-- 跳过不在 SUBMITTED/REVIEWING 的材料
-- 状态机不通过则跳过单条但继续处理其他
-- 返回 `{count, ids}`，前端提示已处理数量
-
-#### 6.3.4 附件在线预览
-
-`ReviewDetailView.vue:130-173`
-
-- 图片：`<img>` 渲染
-- PDF：`<iframe>` 内嵌
-- 其他：fallback 到“下载原件”
-
-#### 6.3.5 统计总览
-
-`StatsAgent.overview`（`agents/stats_agent.py:33-74`）：
-
-| 维度               | SQL 聚合                                                |
-| ------------------ | ------------------------------------------------------- |
-| 待审/已通过/已打回 | `count(*) filter (where status=...)`                    |
-| 五育分项           | `sum(score) group by category`                          |
-| Top 8 学生         | `sum(score) group by user_id order by sum desc limit 8` |
-| 班级对比           | `sum(score), count(distinct user) group by class_name`  |
-| 近 14 天趋势       | `count(*) group by date(created_at)`                    |
-| 待处理申诉         | `Appeal where status='待处理'`                          |
-
-辅导员自动按 `class_group_id` 收窄范围；老师看全校。
+| 表名 | 说明 | 关键字段 |
+|------|------|----------|
+| `terms` | 学期/测评周期 | name, academic_year, is_current, status |
+| `colleges` | 学院 | name, code |
+| `majors` | 专业 | name, code, college_id |
+| `class_groups` | 班级 | name, major_id, counselor_id |
+| `users` | 用户 | student_no, name, password_hash, role, college_id, major_id, class_group_id |
+| `materials` | 综测材料 | title, category, certificate_no, score, status, risk_level, term_id |
+| `review_records` | 审核记录 | material_id, reviewer_id, action, opinion |
+| `appeals` | 申诉 | material_id, student_id, reason, status, evidence_files |
+| `notifications` | 站内通知 | user_id, type, title, content, is_read |
+| `publicity_batches` | 公示批次 | title, class_name, status, starts_at, ends_at |
+| `api_keys` | 外部 API 密钥 | name, key_hash, role, is_active |
 
 ---
 
-## 七、辅导员端
+## 七、API 接口参考
 
-### 7.1 入口
+### 7.1 认证 `/api/auth`
 
-与老师共用教师登录页 `TeacherLoginView.vue`，但角色为 `counselor`：
+| 方法 | 路径 | 认证 | 说明 |
+|------|------|------|------|
+| `POST` | `/api/auth/register` | 无 | 注册用户 (自动推断角色) |
+| `POST` | `/api/auth/login` | 无 | 登录 (返回 JWT) |
+| `GET` | `/api/auth/me` | JWT | 当前用户信息 + 仪表盘数据 |
 
-- 账号 `123456` 演示账号（角色自动判为 counselor）
-- 前端 `App.vue:51-56` 给 counselor 多出 “班级审核、申诉处理、公示发起” 菜单
+### 7.2 材料 `/api/materials`
 
-### 7.2 功能清单（在老师能力基础上扩展）
+| 方法 | 路径 | 认证 | 说明 |
+|------|------|------|------|
+| `POST` | `/api/materials/upload` | 学生 | 提交材料 (手动填写) |
+| `POST` | `/api/materials/upload-file` | 学生 | 上传文件并 AI 解析 |
+| `GET` | `/api/materials/list?termId=` | JWT | 材料列表 (按角色过滤) |
+| `GET` | `/api/materials/summary` | 学生 | 学生综测总览 |
 
-| 模块        | 前端页面              | 后端 Agent          | 功能说明                                       |
-| ----------- | --------------------- | ------------------- | ---------------------------------------------- |
-| 班级审核    | `ReviewListView.vue`  | `CounselorAgent`    | 仅看到本班级学生提交的材料                     |
-| 申诉处理    | `AppealsView.vue`     | `AppealAgent`       | 对本班学生的申诉做 accept / reject            |
-| 公示发起    | `PublicityView.vue`   | `PublicityAgent`    | 预览匿名榜 → 二次确认 → 启动公示 + 3 天倒计时 |
-| 公示归档    | `PublicityView.vue`   | `PublicityAgent`    | 3 天到期自动/手动归档，状态 → `公示结束`       |
-| 申诉复核    | `AppealsView.vue`     | `AppealAgent.resolve` | 填写意见、accept/reject                     |
-| 排名导出    | `PublicityView.vue`   | `ExportAgent`       | 导出 PDF / Excel 排行榜                        |
-| 学期管理    | （隐藏 API）          | `TermAgent`         | `create/update/delete`（仅 counselor 可删）    |
+### 7.3 审核 `/api/review`
 
-### 7.3 关键实现细节
+| 方法 | 路径 | 认证 | 说明 |
+|------|------|------|------|
+| `GET` | `/api/review/list?termId=` | 教师/辅导员 | 待审材料列表 |
+| `GET` | `/api/review/detail/<id>` | 教师/辅导员 | 材料详情 + 审核历史 |
+| `POST` | `/api/review/action` | 教师/辅导员 | 单件审核 (通过/打回) |
+| `POST` | `/api/review/batch-action` | 教师/辅导员 | 批量审核 |
 
-#### 7.3.1 公示发起的“双确认”机制
+### 7.4 申诉 `/api/appeal`
 
-`PublicityAgent.start`（`publicity_agent.py:61-119`）：
+| 方法 | 路径 | 认证 | 说明 |
+|------|------|------|------|
+| `POST` | `/api/appeal/submit` | 学生 | 提交申诉 |
+| `GET` | `/api/appeal/list?termId=` | JWT | 申诉列表 |
+| `GET` | `/api/appeal/detail/<id>` | JWT | 申诉详情 |
+| `POST` | `/api/appeal/resolve` | 教师/辅导员 | 处理申诉 |
+| `POST` | `/api/appeal/confirm-review` | 学生 | 学生对复议结果确认 |
+| `POST` | `/api/appeal/upload-file` | 学生 | 申诉证据上传 |
 
-1. 校验 `pending_appeals == 0`（还有未处理申诉就 400 拒绝）
-2. 校验至少有 `APPROVED` 的材料（否则 400）
-3. **首次调用**（`confirm != '确认公示'`）：返回 `pending_confirmation` 状态 + 匿名预览榜，前端提示“如正确请回复'确认公示'”
-4. **二次调用**（`confirm == '确认公示'`）：把材料批量转为 `PUBLICIZING`、创建 `PublicityBatch`、给学生发通知
+### 7.5 公示 `/api/publicity`
 
-前端 `PublicityView.vue:56-76` 用 `confirmPending` ref 控制按钮文案“发起公示” → “确认公示”。
+| 方法 | 路径 | 认证 | 说明 |
+|------|------|------|------|
+| `GET` | `/api/publicity/rank?termId=` | JWT | 公示排名 (匿名) |
+| `POST` | `/api/publicity/start` | 辅导员 | 发起公示批次 |
+| `POST` | `/api/publicity/archive` | 辅导员 | 归档公示批次 |
 
-#### 7.3.2 公示倒计时
+### 7.6 风险检测 `/api/risk`
 
-`PublicityAgent._countdown`（`publicity_agent.py:165-178`）计算剩余天/小时，`PublicityView.vue:151` 展示。
+| 方法 | 路径 | 认证 | 说明 |
+|------|------|------|------|
+| `POST` | `/api/risk/inspect` | JWT | 检测单件材料风险 |
+| `GET` | `/api/risk/report` | JWT | 风险报告 (所有非低风险材料) |
 
-#### 7.3.3 归档
+### 7.7 AI `/api/ai`
 
-`PublicityAgent.archive`：
+| 方法 | 路径 | 认证 | 说明 |
+|------|------|------|------|
+| `GET` | `/api/ai/status` | JWT | AI 服务状态 |
+| `POST` | `/api/ai/chat` | JWT | AI 对话 (含综测规则 system prompt) |
 
-- 把所有 `PUBLICIZING` → `PUBLICITY_ENDED`
-- `PublicityBatch.status = '已归档'`
-- 给学生发“综测公示已归档”通知
+### 7.8 学期管理 `/api/terms`
 
-#### 7.3.4 申诉处理
+| 方法 | 路径 | 认证 | 说明 |
+|------|------|------|------|
+| `GET` | `/api/terms/list` | JWT | 学期列表 |
+| `GET` | `/api/terms/current` | JWT | 当前学期 |
+| `POST` | `/api/terms/` | 教师/辅导员 | 创建学期 |
+| `PATCH` | `/api/terms/<id>` | 教师/辅导员 | 更新学期 |
+| `DELETE` | `/api/terms/<id>` | 辅导员 | 删除学期 |
 
-`AppealAgent.resolve`（`appeal_agent.py:92-122`）：
+### 7.9 组织架构 `/api/organization`
 
-- 必填意见（前端 `AppealsView.vue:218-232` 的 textarea）
-- `accept` → 申诉状态 `已通过`，材料回到 `PUBLICIZING`
-- `reject` → 申诉状态 `已驳回`，材料 `PUBLICITY_ENDED`
-- 给学生发“申诉已复核”通知
+| 方法 | 路径 | 认证 | 说明 |
+|------|------|------|------|
+| `GET` | `/api/organization/colleges` | JWT | 学院列表 |
+| `POST` | `/api/organization/colleges` | 辅导员 | 创建学院 |
+| `GET` | `/api/organization/majors?collegeId=` | JWT | 专业列表 |
+| `POST` | `/api/organization/majors` | 辅导员 | 创建专业 |
+| `GET` | `/api/organization/classes?majorId=` | JWT | 班级列表 |
+| `POST` | `/api/organization/classes` | 辅导员 | 创建班级 |
+| `GET` | `/api/organization/tree` | JWT | 完整组织树 |
 
-#### 7.3.5 申诉通知辅导员
+### 7.10 通知 `/api/notifications`
 
-`AppealAgent._notify_counselor`（`appeal_agent.py:165-179`）：
+| 方法 | 路径 | 认证 | 说明 |
+|------|------|------|------|
+| `GET` | `/api/notifications/list` | JWT | 通知列表 (最多80条) |
+| `GET` | `/api/notifications/unread-count` | JWT | 未读数量 |
+| `POST` | `/api/notifications/<id>/read` | JWT | 标记已读 |
+| `POST` | `/api/notifications/read-all` | JWT | 全部已读 |
+| `DELETE` | `/api/notifications/<id>` | JWT | 删除通知 |
 
-- 给所有 `counselor` 角色的用户发 `appeal_submitted` 通知
-- 辅导员绑定 `class_group_id` 时按班级过滤
+### 7.11 导出 `/api/export`
 
-#### 7.3.6 学期管理
+| 方法 | 路径 | 认证 | 说明 |
+|------|------|------|------|
+| `GET` | `/api/export/student-summary.pdf` | 学生 | 学生成绩单 PDF |
+| `GET` | `/api/export/student-summary.xlsx` | 学生 | 学生成绩单 Excel |
+| `GET` | `/api/export/ranking.pdf` | 教师/辅导员 | 排名 PDF |
+| `GET` | `/api/export/ranking.xlsx` | 教师/辅导员 | 排名 Excel |
 
-`TermAgent.create/update/delete`：
+### 7.12 统计 `/api/stats`
 
-- 创建/更新：仅 `teacher` 或 `counselor`
-- 删除：仅 `counselor`，且 `materials / appeals` 为空才允许
-- `isCurrent=True` 时自动把其他学期置为非当前
-- 启动时 `_ensure_default_term` 按月份自动建一个“2024-2025 学年上/下学期”
+| 方法 | 路径 | 认证 | 说明 |
+|------|------|------|------|
+| `GET` | `/api/stats/overview` | 教师/辅导员 | 仪表盘统计 |
+| `GET` | `/api/stats/student` | 学生 | 个人统计 (雷达图) |
 
----
+### 7.13 外部 API `/api/external`
 
-## 八、通用能力
+外部 API 使用 `Bearer <api_key>` 认证 (非 JWT)。
 
-### 8.1 智能助手（AI Assistant）
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/api/external/api-keys` | 创建 API 密钥 |
+| `GET` | `/api/external/api-keys` | 密钥列表 |
+| `DELETE` | `/api/external/api-keys/<id>` | 删除密钥 |
+| `GET` | `/api/external/users?role=` | 用户列表 |
+| `GET` | `/api/external/users/<id>` | 用户详情 |
+| `GET` | `/api/external/students/<no>/summary` | 学生成绩汇总 |
+| `GET` | `/api/external/students/<no>/materials` | 学生材料列表 |
+| `GET` | `/api/external/materials?status=&category=` | 材料列表 |
+| `GET` | `/api/external/materials/<id>` | 材料详情 |
+| `POST` | `/api/external/materials` | 创建材料 |
+| `GET` | `/api/external/publicity/rankings` | 公示排名 |
+| `GET` | `/api/external/publicity/batches` | 公示批次 |
+| `GET` | `/api/external/stats/overview` | 快速统计 |
+| `POST` | `/api/external/ai/chat` | AI 对话 |
 
-- 路由：`/ai`
-- 后端：`/api/ai/status`、`/api/ai/chat`
-- 模型：`DeepSeek V4 Pro`（OpenAI 兼容协议）
-- 提示词：`agents/scoring_rules_prompt.md` 注入完整五育评分规则，保证答案与系统一致
-- 上下文：仅保留最近 10 条（`MAX_MESSAGES=12`），单条 4000 字符
-- 前端：`AiAssistantView.vue` 显示 token 消耗、模型名、状态
+### 7.14 其他
 
-### 8.2 站内消息
-
-- 路由：`/api/notifications/*`
-- 前端：`NotificationBell.vue` 悬浮卡片 + 角标
-- 推送点：审核通过/打回、申诉提交/复核、公示发起/归档
-- API：列表、未读数、标记单条已读、全部已读、删除
-
-### 8.3 数据导出
-
-| 接口                                            | 角色限制           | 格式         | 内容                       |
-| ----------------------------------------------- | ------------------ | ------------ | -------------------------- |
-| `/api/export/student-summary.<pdf\|xlsx>`       | `student`          | PDF / Excel  | 个人五育分项 + 总分 + 明细 |
-| `/api/export/ranking.<pdf\|xlsx>`               | `teacher` / `counselor` | PDF / Excel  | 班级/全校排行榜          |
-
-实现：`openpyxl`（Excel）+ `reportlab`（PDF，含中文字体 `UnicodeCIDFont`）。
-
-### 8.4 统计与图表
-
-- `/api/stats/overview` → 老师/辅导员用
-- `/api/stats/student` → 学生用
-- 前端用 `Chart.js + vue-chartjs` 渲染：柱图、饼图、折线、雷达（`DashboardView.vue` + `components/ChartView.vue`）
-
-### 8.5 外部 API（Open API）
-
-`/api/external/*` 由 `backend/app/routes/external.py` 提供，用 API Key 鉴权（`Bearer zce_xxx`）：
-
-| 端点                                        | 用途                          |
-| ------------------------------------------- | ----------------------------- |
-| `POST/GET/DELETE /api/external/api-keys`    | 创建/列出/删除 API Key        |
-| `GET /api/external/users`                   | 用户列表                      |
-| `GET /api/external/students/{no}/summary`    | 学生综测汇总                  |
-| `GET /api/external/students/{no}/materials` | 学生材料列表                  |
-| `GET/POST /api/external/materials`          | 列表/录入材料                 |
-| `GET /api/external/publicity/rankings`      | 公开排行榜                    |
-| `GET /api/external/publicity/batches`       | 公示批次                      |
-| `GET /api/external/stats/overview`          | 概览统计                      |
-| `POST /api/external/ai/chat`                | 透传 DeepSeek 调用            |
-
-可对接第三方 BI、OA、教务系统。
-
----
-
-## 九、数据模型
-
-`backend/app/models.py` — SQLAlchemy ORM 全部表：
-
-| 表                   | 模型            | 关键字段                                                                 |
-| -------------------- | --------------- | ------------------------------------------------------------------------ |
-| `terms`              | `Term`          | `id, name, academic_year, semester_type, starts_at, ends_at, is_current` |
-| `colleges`           | `College`       | `id, name, code`                                                         |
-| `majors`             | `Major`         | `id, college_id, name, code`                                             |
-| `class_groups`       | `ClassGroup`    | `id, major_id, name, grade_year, counselor_id`                           |
-| `users`              | `User`          | `id, student_no, name, password_hash, role, class_name, *_id`            |
-| `materials`          | `Material`      | `id, student_id, term_id, title, category, certificate_no, score, status, risk_level, risk_reasons, ocr_text, file_url` |
-| `review_records`     | `ReviewRecord`  | `id, material_id, reviewer_id, action, opinion, score_delta`             |
-| `appeals`            | `Appeal`        | `id, material_id, student_id, term_id, reason, evidence_files, status, result_opinion` |
-| `notifications`      | `Notification`  | `id, user_id, type, title, content, link, related_id, is_read`           |
-| `publicity_batches`  | `PublicityBatch`| `id, title, class_name, status, starts_at, ends_at, created_by_id, archived_at` |
-| `api_keys`           | `ApiKey`        | `id, name, key_hash, role, is_active, last_used_at`                      |
-
-`User` 通过 `password_hash`（`werkzeug.security.generate_password_hash`）安全存储密码，登录时 `check_password`。
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/health` | 健康检查 |
 
 ---
 
-## 十、接口约定
+## 八、认证机制
 
-### 10.1 鉴权
+### 8.1 JWT 认证 (内部 API)
 
-- `POST /api/auth/login` 成功后返回 `{token, user, menus}`
-- Token 通过 `Authorization: Bearer <token>` 携带
-- 12 小时有效期
-- `helpers.py::current_user` 统一解析 + 抛 401
+- **库**: `itsdangerous.URLSafeTimedSerializer`
+- **过期**: 12 小时
+- **载荷**: `{"id": user.id, "role": user.role}`
+- **传递**: `Authorization: Bearer <token>`
+- **密码**: `werkzeug.security` 哈希
 
-### 10.2 错误处理
+### 8.2 API Key 认证 (外部 API)
 
-`backend/app/__init__.py` 注册了 3 个错误处理器：
-
-| 异常                  | HTTP | 响应                       |
-| --------------------- | ---- | -------------------------- |
-| `HTTPException`       | 原码 | `{message, status}`        |
-| `StateMachineError`   | 400  | `{message, status: 400}`   |
-| `ValueError`          | 400  | `{message, status: 400}`   |
-
-前端 `apiFetch` 统一从 `payload.message` 取错误文案。
-
-### 10.3 前端 API 封装
-
-`frontend/src/api/client.ts`：
-
-- `apiFetch<T>(url)` → `fetch` + `Authorization` + 401 自动跳登录
-- `postJson<T>(url, body)` → 同上 + `Content-Type: application/json`
-- `postForm<T>(url, FormData)` → 文件上传
+- **格式**: `zce_` + 32 字节 url-safe 随机串
+- **存储**: SHA-256 哈希
+- **传递**: `Authorization: Bearer <api_key>`
+- 记录 `last_used_at` 最后使用时间
 
 ---
 
-## 十一、前端实现要点
+## 九、前端架构
 
-### 11.1 路由
+### 9.1 路由表
 
-`frontend/src/router/index.ts`
+| 路径 | 页面 | 权限 |
+|------|------|------|
+| `/login/student` | 学生登录 | 公开 |
+| `/login/teacher` | 教师/辅导员登录 | 公开 |
+| `/register` | 注册 | 公开 |
+| `/dashboard` | 工作台 | 需登录 |
+| `/materials` | 材料上传 | 学生 |
+| `/review` | 审核列表 | 教师/辅导员 |
+| `/review/:id` | 审核详情 | 教师/辅导员 |
+| `/appeals` | 申诉管理 | 需登录 |
+| `/publicity` | 公示排名 | 需登录 |
+| `/ai` | AI 助手 | 需登录 |
 
-- 7 条主路由 + 4 条公共路由
-- `router.beforeEach` 统一鉴权：`meta.public` 标记的页面在已登录时自动跳 `/dashboard`
+路由守卫: 未登录 → 跳转登录页；已登录访问公开页 → 跳转工作台。
 
-### 11.2 状态管理（Pinia）
+### 9.2 导航菜单 (按角色)
 
-| Store            | 文件                          | 职责                                  |
-| ---------------- | ----------------------------- | ------------------------------------- |
-| `useSessionStore`| `stores/session.ts`           | token、user、loginPath 持久化到 sessionStorage |
-| `useTermStore`   | `stores/term.ts`              | 当前学期 ID，term 选择器持久化        |
-| `useNotificationStore` | `stores/notification.ts` | 通知列表/未读数                       |
+| 学生 | 教师 | 辅导员 |
+|------|------|--------|
+| 总览 | 总览 | 总览 |
+| 公示排名 | 公示排名 | 公示排名 |
+| 智能助手 | 智能助手 | 智能助手 |
+| 材料上传 | 材料审核 | 班级审核 |
+| 我的申诉 | | 申诉处理 |
+| | | 公示发起 |
 
-### 11.3 通用组件
+### 9.3 状态管理
 
-| 组件                  | 用途                                                                 |
-| --------------------- | -------------------------------------------------------------------- |
-| `App.vue`             | 壳布局（侧边栏 + 移动端 App Bar + 抽屉）                             |
-| `StatusTag.vue`       | 状态中文标签 + 颜色                                                  |
-| `EmptyState.vue`      | 空数据占位                                                            |
-| `TermSelector.vue`    | 学期切换器                                                            |
-| `ChartView.vue`       | Chart.js 封装                                                         |
-| `NotificationBell.vue`| 通知铃铛 + 下拉                                                       |
-
-### 11.4 视觉与样式
-
-详见 `docs/frontend-design.md`：
-
-- CSS 变量集中管理（`--primary` `#2663eb` + `--accent` `#0f766e` + `--sidebar-bg` `#172033`）
-- 三类 surface：`.surface-panel` / `.surface-card` / `.surface-muted`
-- `:focus-visible` 焦点环（键盘友好）
-- `prefers-color-scheme: dark` 已预留扩展点
-- 三个断点：1200px / 920px / 560px
-
-### 11.5 持久化
-
-- `sessionStorage.zc_token` / `zc_user` / `zc_portal`
-- 退出时统一清理
+- **Session Store**: 登录态 (JWT / 用户信息)，持久化到 sessionStorage
+- **Term Store**: 当前学期选择，跨组件通信
+- **Notification Store**: 通知轮询 (30s 间隔)
 
 ---
 
-## 十二、部署与演示账号
+## 十、数据统计
 
-### 12.1 后端启动
-
-```bash
-cd backend
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python run.py
-```
-
-默认连接 `postgresql+psycopg://postgres:123456@localhost:5432/zong_ce`
-
-### 12.2 前端启动
-
-```bash
-npm install
-npm run dev          # 5173
-npm run dev:5174     # 备用端口
-```
-
-### 12.3 演示数据
-
-```bash
-cd backend
-.venv/bin/python scripts/seed_demo.py
-```
-
-### 12.4 演示账号
-
-| 角色         | 学/工号      | 密码    |
-| ------------ | ------------ | ------- |
-| 学生         | `2023001001` | `123456` |
-| 老师         | `1001`       | `123456` |
-| 辅导员       | `123456`     | `123456` |
-
-### 12.5 DeepSeek 接入
-
-`.env` 中配置：
-
-```text
-DEEPSEEK_API_KEY=
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-v4-pro
-DEEPSEEK_TIMEOUT=30
-```
-
-未配置时 `GET /api/ai/status` 会返回 `configured: false`，前端禁用发送按钮。
-
-### 12.6 文件上传
-
-- 上传目录：`backend/app/uploads/{materials,appeals}/`
-- 大小限制：5MB
-- 允许类型：JPG / PNG / GIF / WebP / PDF
-- 静态访问：`/api/materials/uploads/<sub>/<file>`
-
----
-
-## 附录：模块边界一览（来源 README）
-
-| Agent              | 接口前缀           |
-| ------------------ | ------------------ |
-| Auth Agent         | `/api/auth/*`      |
-| Audit Agent        | `/api/materials/*` |
-| Counselor Agent    | `/api/review/*`    |
-| Appeal Agent       | `/api/appeal/*`    |
-| Publicity Agent    | `/api/publicity/*` |
-| Risk Agent         | `/api/risk/*`      |
-| DeepSeek Agent     | `/api/ai/*`        |
-| Term Agent         | `/api/terms/*`     |
-| Organization Agent | `/api/organization/*` |
-| Notification Agent | `/api/notifications/*` |
-| Export Agent       | `/api/export/*`    |
-| Master Agent       | （无独立接口，按角色聚合） |
+| 指标 | 数量 |
+|------|------|
+| API 端点 | 55+ |
+| 数据库表 | 11 |
+| Agent 类 | 14 |
+| 前端路由 | 12 |
+| 前端视图 | 11 |
+| 外部 AI 集成 | 2 (DeepSeek, SiliconFlow) |
+| 材料状态 | 8 |
+| 评分类别 | 6 (五育 + 能力) |
