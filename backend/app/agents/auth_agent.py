@@ -49,14 +49,19 @@ class AuthAgent:
     def login(self, payload: dict) -> dict:
         student_no = str(payload.get("studentNo", "")).strip()
         password = str(payload.get("password", "")).strip()
+        portal = str(payload.get("portal", "")).strip().lower()
 
         if not student_no:
             abort(400, description="学工号不能为空")
+        if portal and portal not in {"student", "staff"}:
+            abort(400, description="登录入口非法")
 
         user = User.query.filter_by(student_no=student_no).first()
 
         if not user:
             if re.fullmatch(r"20\d{9}", student_no):
+                if portal == "staff":
+                    abort(403, description="该账号不属于教师端，请前往学生端登录")
                 role = "student"
                 user = User(student_no=student_no, name=f"学生{student_no[-4:]}", role=role, class_name="计科2301")
                 user.set_password(password or "123456")
@@ -66,6 +71,11 @@ class AuthAgent:
                 abort(401, description="学工号或密码错误")
         elif not user.check_password(password):
             abort(401, description="学工号或密码错误")
+
+        if portal == "student" and user.role != "student":
+            abort(403, description="该账号属于教师端，请前往教师端登录")
+        if portal == "staff" and user.role not in {"teacher", "counselor"}:
+            abort(403, description="该账号属于学生端，请前往学生端登录")
 
         return self._session_payload(user)
 

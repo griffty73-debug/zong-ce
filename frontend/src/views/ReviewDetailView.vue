@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { CheckCircle2, RotateCw, XCircle } from 'lucide-vue-next'
+import { CheckCircle2, Download, FileText, RotateCw, XCircle } from 'lucide-vue-next'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -20,6 +20,15 @@ const form = reactive({
 })
 
 const materialId = computed(() => Number(route.params.id))
+
+const fileExt = computed(() => {
+  const source = material.value?.fileUrl || material.value?.fileName || ''
+  const match = source.toLowerCase().match(/\.([a-z0-9]+)(?:$|\?)/)
+  return match ? match[1] : ''
+})
+
+const isImage = computed(() => ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(fileExt.value))
+const isPdf = computed(() => fileExt.value === 'pdf')
 
 async function load() {
   error.value = ''
@@ -117,6 +126,53 @@ onMounted(load)
       </article>
     </section>
 
+    <section v-if="material" class="panel">
+      <header class="material-file-header">
+        <div>
+          <h2>学生上传材料</h2>
+          <p class="muted">
+            {{ material.fileName || (material.fileUrl ? '在线材料' : '该材料未附文件，仅文字说明') }}
+          </p>
+        </div>
+        <a
+          v-if="material.fileUrl"
+          class="button secondary"
+          :href="material.fileUrl"
+          target="_blank"
+          rel="noopener"
+          :download="material.fileName || true"
+        >
+          <Download :size="16" aria-hidden="true" />
+          下载原件
+        </a>
+      </header>
+      <div v-if="material.fileUrl" class="material-file-body">
+        <div v-if="isImage" class="material-file-stage">
+          <img :src="material.fileUrl" :alt="material.fileName || '学生上传材料'" />
+        </div>
+        <iframe
+          v-else-if="isPdf"
+          class="material-file-pdf"
+          :src="material.fileUrl"
+          :title="material.fileName || '学生上传 PDF'"
+        />
+        <div v-else class="material-file-fallback">
+          <FileText :size="28" aria-hidden="true" />
+          <div>
+            <strong>{{ material.fileName || '未知文件' }}</strong>
+            <p class="muted">该格式不支持在线预览，请点击右上方“下载原件”后查看。</p>
+          </div>
+        </div>
+      </div>
+      <div v-else class="material-file-empty">
+        <FileText :size="28" aria-hidden="true" />
+        <div>
+          <strong>暂无原始文件</strong>
+          <p class="muted">学生未上传或未保留原始证书文件，可参考 OCR 与说明字段进行核验。</p>
+        </div>
+      </div>
+    </section>
+
     <section class="panel">
       <h2>审核记录</h2>
       <div v-if="reviews.length" class="table-wrap">
@@ -145,3 +201,74 @@ onMounted(load)
     </section>
   </div>
 </template>
+
+<style scoped>
+.material-file-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.material-file-header h2 {
+  margin: 0;
+}
+
+.material-file-header p {
+  margin: 4px 0 0;
+}
+
+.material-file-body {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #0f172a;
+  overflow: hidden;
+}
+
+.material-file-stage {
+  display: grid;
+  place-items: center;
+  max-height: 640px;
+  padding: 12px;
+}
+
+.material-file-stage img {
+  max-width: 100%;
+  max-height: 600px;
+  display: block;
+  object-fit: contain;
+  background: #ffffff;
+  border-radius: 4px;
+}
+
+.material-file-pdf {
+  width: 100%;
+  height: 640px;
+  border: 0;
+  background: #ffffff;
+}
+
+.material-file-fallback,
+.material-file-empty {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-muted);
+  color: var(--ink);
+}
+
+.material-file-fallback strong,
+.material-file-empty strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.material-file-fallback p,
+.material-file-empty p {
+  margin: 0;
+}
+</style>

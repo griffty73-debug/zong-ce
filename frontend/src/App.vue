@@ -61,7 +61,9 @@ const currentTitle = computed(() => {
   const match = navItems.value.find((item) => item.to === path)
   if (match) return match.label
   if (path.startsWith('/review/')) return '审核详情'
-  if (path === '/login') return '登录'
+  if (path === '/login/student') return '学生登录'
+  if (path === '/login/teacher') return '教师登录'
+  if (path.startsWith('/login')) return '登录'
   if (path === '/register') return '注册'
   return '高校综测系统'
 })
@@ -86,8 +88,9 @@ function handleNavClick() {
 }
 
 function logout() {
+  const target = session.loginPath || '/login/student'
   session.logout()
-  router.push('/login')
+  router.push(target)
   closeNav()
 }
 

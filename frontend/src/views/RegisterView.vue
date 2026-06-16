@@ -72,9 +72,9 @@ async function submit() {
       name: form.name,
       password: form.password,
       className: form.className,
-      collegeId: form.collegeId || null,
-      majorId: form.majorId || null,
-      classGroupId: form.classGroupId || null,
+      collegeId: form.collegeId ? Number(form.collegeId) : null,
+      majorId: form.majorId ? Number(form.majorId) : null,
+      classGroupId: form.classGroupId ? Number(form.classGroupId) : null,
     })
     router.push('/dashboard')
   } catch (err: any) {
@@ -137,7 +137,7 @@ onMounted(loadOrg)
           <UserPlus :size="16" aria-hidden="true" />
           {{ loading ? '创建中' : '创建账号' }}
         </button>
-        <RouterLink class="button secondary" to="/login">已有账号登录</RouterLink>
+        <RouterLink class="button secondary" to="/login/student">已有账号登录</RouterLink>
       </form>
     </section>
     <section class="auth-aside">

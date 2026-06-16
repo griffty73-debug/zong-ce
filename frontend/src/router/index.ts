@@ -6,7 +6,9 @@ const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', redirect: '/dashboard' },
-    { path: '/login', component: () => import('@/views/LoginView.vue'), meta: { public: true } },
+    { path: '/login', redirect: '/login/student' },
+    { path: '/login/student', component: () => import('@/views/StudentLoginView.vue'), meta: { public: true } },
+    { path: '/login/teacher', component: () => import('@/views/TeacherLoginView.vue'), meta: { public: true } },
     { path: '/register', component: () => import('@/views/RegisterView.vue'), meta: { public: true } },
     { path: '/dashboard', component: () => import('@/views/DashboardView.vue') },
     { path: '/materials', component: () => import('@/views/MaterialsView.vue') },
@@ -20,7 +22,7 @@ const router = createRouter({
 
 router.beforeEach((to) => {
   const session = useSessionStore()
-  if (!to.meta.public && !session.isAuthed) return '/login'
+  if (!to.meta.public && !session.isAuthed) return session.loginPath || '/login/student'
   if (to.meta.public && session.isAuthed) return '/dashboard'
 })
 

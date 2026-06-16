@@ -58,6 +58,7 @@ interface ParseResult {
   confidence: 'high' | 'medium' | 'low'
   rawContent: string
   fileName?: string
+  fileUrl?: string
   regions?: Region[]
   scoreBasis?: ScoreBasis | null
 }
@@ -195,6 +196,10 @@ async function uploadAndParse(file: File) {
   try {
     const response = await postForm<ParseResponse>('/api/materials/upload-file', data)
     parsedResult.value = response.data
+    if (response.data?.fileUrl) {
+      form.fileUrl = response.data.fileUrl
+      form.fileName = response.data.fileName || file.name
+    }
     success.value = response.message || 'AI 解析完成，请核实后提交'
   } catch (err: any) {
     uploadError.value = err.message || '文件解析失败'
@@ -229,7 +234,7 @@ function applyParsedResult(result: ParseResult) {
     description: result.description,
     certificateNo: result.certificateNo,
     fileName: result.fileName || selectedFile.value?.name || '',
-    fileUrl: '',
+    fileUrl: result.fileUrl || '',
     score: result.suggestedScore || 1,
   })
   riskMessage.value = ''
@@ -258,7 +263,7 @@ async function upload() {
   success.value = ''
   loading.value = true
   try {
-    const payload = { ...form }
+    const payload: Record<string, unknown> = { ...form }
     if (termStore.currentId) payload.termId = termStore.currentId
     const result = await postJson<{ message?: string; suggestions?: string[] }>('/api/materials/upload', payload)
     success.value = result.message || '材料已提交，状态进入[已提交]'

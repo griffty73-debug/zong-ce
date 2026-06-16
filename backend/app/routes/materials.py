@@ -51,7 +51,12 @@ def upload_file():
     if user.role != "student":
         abort(403, description="仅学生可解析材料")
     saved = _save_upload(request.files.get("file"), "materials")
-    return jsonify(master().material_parser.parse(Path(UPLOAD_ROOT / saved["rel"]).read_bytes(), saved["contentType"], saved["name"]))
+    response = master().material_parser.parse(Path(UPLOAD_ROOT / saved["rel"]).read_bytes(), saved["contentType"], saved["name"])
+    payload = response.get("data") if isinstance(response.get("data"), dict) else None
+    if payload is not None:
+        payload["fileUrl"] = saved["url"]
+        payload["fileName"] = saved["name"]
+    return jsonify(response)
 
 
 @materials_bp.get("/list")
